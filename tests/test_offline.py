@@ -388,3 +388,153 @@ def test_redo_keeps_history(tmp_path, monkeypatch):
     assert r["status"] == "draft"
     assert len(r["history"]) == 2                  # 作废动作留痕，可审计
 
+
+# ---- 放行/投稿统一闸门：QC 必须对应当前成片 ------------------------------
+def _fake_release(tmp_path, monkeypatch, *, final_exists=True, qc_ok=True,
+                  qc_pid="ep-999", duration=100.0):
+    """闸门测试夹具：全阶段 done + render.json + 成片文件 + qc_report.json。"""
+    _fake_project(tmp_path, monkeypatch)
+    from src import store
+    from src.jsonio import save_json
+    pdir = tmp_path / "projects" / "ep-999"
+    final = pdir / "output" / "final.mp4"
+    if final_exists:
+        final.write_bytes(b"\x00" * 16)
+    save_json({"final": str(final), "cover": str(pdir / "output" / "cover.jpg"),
+               "duration": duration, "width": 1920, "height": 1080, "fps": 30.0},
+              pdir / "output" / "render.json")
+    save_json({"pid": qc_pid, "checked_at": store.now(), "duration": duration,
+               "mean_volume_db": -20.0, "problems": [] if qc_ok else ["x"],
+               "ok": qc_ok},
+              pdir / "output" / "qc_report.json")
+    return pdir
+
+
+def test_gate_all_valid_passes(tmp_path, monkeypatch):
+    """当前成片和 QC 都有效 → 闸门放行。"""
+    from src import review
+    _fake_release(tmp_path, monkeypatch)
+    assert review.gate("ep-999") == []
+
+
+def test_gate_blocks_stale_qc_after_redo(tmp_path, monkeypatch):
+    """旧 QC PASS 文件 + redo render → 阶段已失效，approve 必须被拒。"""
+    import argparse
+    import pytest
+    from src import review, store
+    _fake_release(tmp_path, monkeypatch)
+    store.redo_stage("ep-999", "render")
+    problems = review.gate("ep-999")
+    assert any("render" in p for p in problems)
+    from cli import cmd_approve
+    with pytest.raises(SystemExit):                # cli approve 同样拒绝
+        cmd_approve(argparse.Namespace(pid="ep-999", note=""))
+
+
+def test_gate_blocks_qc_stage_not_done(tmp_path, monkeypatch):
+    """QC 阶段未完成 → 不允许 approve。"""
+    from src import review, store
+    from src.jsonio import save_json
+    _fake_release(tmp_path, monkeypatch)
+    m = store.manifest("ep-999")
+    m["stages"].pop("qc")
+    save_json(m, tmp_path / "projects" / "ep-999" / "manifest.json")
+    assert any("qc" in p for p in review.gate("ep-999"))
+
+
+def test_gate_blocks_foreign_or_failed_qc(tmp_path, monkeypatch):
+    from src import review
+    from src.jsonio import load_json, save_json
+    pdir = _fake_release(tmp_path, monkeypatch, qc_pid="ep-001")  # 别的项目的 QC
+    assert any("pid" in p for p in review.gate("ep-999"))
+    qc = load_json(pdir / "output" / "qc_report.json")
+    qc["pid"] = "ep-999"
+    qc["ok"] = False                                              # QC 未过
+    save_json(qc, pdir / "output" / "qc_report.json")
+    assert any("QC 未通过" in p for p in review.gate("ep-999"))
+
+
+def test_gate_blocks_missing_final(tmp_path, monkeypatch):
+    """render.json 指向的成片不存在 → 拒绝。"""
+    from src import review
+    _fake_release(tmp_path, monkeypatch, final_exists=False)
+    assert any("成片" in p for p in review.gate("ep-999"))
+
+
+def test_gate_blocks_stale_qc_file(tmp_path, monkeypatch):
+    """QC 报告早于当前成片 mtime（旧 QC 残留）→ 拒绝。"""
+    import os
+    from src import review
+    pdir = _fake_release(tmp_path, monkeypatch)
+    final = pdir / "output" / "final.mp4"
+    st = final.stat()
+    os.utime(final, (st.st_atime + 10, st.st_mtime + 10))    # 成片比 QC 新
+    assert any("旧 QC" in p for p in review.gate("ep-999"))
+
+
+def test_gate_blocks_duration_mismatch(tmp_path, monkeypatch):
+    """QC 报告时长与当前成片不一致（对错了片）→ 拒绝。"""
+    from src import review
+    from src.jsonio import load_json, save_json
+    pdir = _fake_release(tmp_path, monkeypatch, duration=100.0)
+    qc = load_json(pdir / "output" / "qc_report.json")
+    qc["duration"] = 150.0
+    save_json(qc, pdir / "output" / "qc_report.json")
+    assert any("时长不一致" in p for p in review.gate("ep-999"))
+
+
+def _stub_sau(monkeypatch):
+    """stub 掉 sau_bridge（biliup 桥），publish 测试绝不触网/真上传。"""
+    import sys
+    import types
+    calls = {"upload": 0}
+    stub = sys.modules.get("sau_bridge")
+    if stub is None or not getattr(stub, "_is_stub", False):
+        stub = types.ModuleType("sau_bridge")
+        stub._is_stub = True
+        monkeypatch.setitem(sys.modules, "sau_bridge", stub)
+    stub.check_account = lambda: True
+    stub.login_interactive = lambda: None
+
+    def _upload(**kw):
+        calls["upload"] += 1
+        return "BV1FAKE00000"
+
+    stub.upload = _upload
+    import src.uploader as uploader
+    monkeypatch.setattr(uploader, "sau_bridge", stub)   # 统一改绑当前 stub
+    return calls
+
+
+def test_publish_cannot_bypass_approve_and_gate(tmp_path, monkeypatch):
+    """publish 不得绕过 approve，也不得绕过闸门（旧 QC 残留场景）。"""
+    import pytest
+    from src import review, store, uploader
+    calls = _stub_sau(monkeypatch)
+    _fake_release(tmp_path, monkeypatch)
+    review.reset("ep-999", "测试：回到 draft")     # 夹具默认 ready，先退回
+    # ① 未 approve（draft）→ 拒绝，绝不上传
+    with pytest.raises(RuntimeError, match="approve"):
+        uploader.publish("ep-999")
+    assert calls["upload"] == 0
+    # ② redo render（成片+QC 均失效，旧 QC 文件留在磁盘）后，即使有人绕过
+    #    cli 闸门直接把审片状态改成 ready，publish 的二次校验仍必须拦截
+    store.redo_stage("ep-999", "render")
+    review.approve("ep-999", "误操作：没重跑 make 就放行")
+    with pytest.raises(RuntimeError, match="投稿前置检查未过"):
+        uploader.publish("ep-999")
+    assert calls["upload"] == 0
+
+
+def test_publish_happy_path_through_gate(tmp_path, monkeypatch):
+    """有效成片 + QC + ready → publish 走通（stub 上传，不触网）。"""
+    from src import review, uploader
+    calls = _stub_sau(monkeypatch)
+    pdir = _fake_release(tmp_path, monkeypatch)
+    (pdir / "output" / "upload_info.txt").write_text(
+        "标题: t\n简介:\n测试简介\n", encoding="utf-8")
+    review.approve("ep-999", "看过")
+    r = uploader.publish("ep-999")
+    assert r["bvid"] == "BV1FAKE00000"
+    assert calls["upload"] == 1
+

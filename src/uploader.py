@@ -45,11 +45,11 @@ def publish(pid: str) -> dict:
     rj = load_json(store.project_dir(pid) / "output" / "render.json") or {}
     if not rj.get("final"):
         raise RuntimeError("成片缺失，先跑 make")
-    # 发布安全闸门（二次校验）：不只信审片状态——QC 必须通过、全阶段必须完成
-    qc = load_json(store.project_dir(pid) / "output" / "qc_report.json")
-    if not qc or not qc.get("ok"):
-        problems = "；".join(qc.get("problems", [])) if qc else "QC 未运行"
-        raise RuntimeError(f"QC 未通过，拒绝投稿：{problems}")
+    # 发布安全闸门（二次校验）：不只信审片状态——与 approve 同一套 gate：
+    # 阶段必须全完成、QC 必须通过、QC 报告必须对应当前成片（旧 QC 残留拦截）
+    gate_problems = review.gate(pid)
+    if gate_problems:
+        raise RuntimeError("投稿前置检查未过：" + "；".join(gate_problems))
     m = store.manifest(pid)
     missing = [s for s in store.STAGES if m["stages"].get(s) != "done"]
     if missing:

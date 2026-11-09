@@ -17,7 +17,6 @@ import sys
 
 from src import ingest, pipeline, preflight, publisher, review, store
 from src.config import load_config
-from src.jsonio import load_json
 
 
 def _die(msg: str) -> None:
@@ -93,12 +92,11 @@ def cmd_show(a) -> None:
 
 
 def cmd_approve(a) -> None:
-    if (store.project_dir(a.pid) / "output" / "final.mp4").exists() is False:
-        _die("还没有成片，先 make")
-    qc = load_json(store.project_dir(a.pid) / "output" / "qc_report.json")
-    if not qc or not qc.get("ok"):
-        _die("QC 未通过或未运行——不放行。先跑 make 到 qc PASS"
-             "（明细见 output/qc_report.json）")
+    # 放行前置闸门：render/qc 阶段完成 + 成片真实存在 + QC 属于当前成片
+    # （旧 QC 残留、redo 后未重跑、QC 未过一律不放行）
+    problems = review.gate(a.pid)
+    if problems:
+        _die("放行前置检查未过：" + "；".join(problems))
     review.approve(a.pid, a.note or "")
     print(f"{a.pid}: 已放行（ready）。下一步: publish-prepare")
 
