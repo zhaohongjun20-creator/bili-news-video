@@ -589,7 +589,6 @@ def test_publish_failure_leaves_no_success_record(tmp_path, monkeypatch):
     import pytest
     import sys
     from src import review, uploader
-    pdir, _calls = _publish_once.__wrapped__(tmp_path, monkeypatch) if False else (None, None)
     calls = _stub_sau(monkeypatch)
     pdir = _fake_release(tmp_path, monkeypatch)
     (pdir / "output" / "upload_info.txt").write_text(
