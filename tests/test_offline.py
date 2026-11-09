@@ -128,6 +128,13 @@ def test_validate_rejects_duplicate_ref():
     assert not scriptgen._validate(_script_with([1, 2, 2]), refs={1, 2})
 
 
+def test_validate_rejects_unknown_ref():
+    """引用不存在的条目：3 条却引用 ref=4（越界）→ 打回。"""
+    assert not scriptgen._validate(_script_with([1, 2, 4]), refs={1, 2, 3})
+    # ref=0（非条目段的占位值）出现在 item 段同样是无效引用
+    assert not scriptgen._validate(_script_with([0, 1, 2]), refs={1, 2, 3})
+
+
 def test_validate_rejects_empty_headline():
     """item 段 card.headline 为空 → 打回模板降级。"""
     s = _script_with([1, 2, 3])
