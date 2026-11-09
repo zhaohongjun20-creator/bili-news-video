@@ -99,11 +99,11 @@ def hammer(pid: str) -> dict:
                               if seg["id"] in bad_ids
                               and seg.get("kind") in ("china", "mainline")})
         script["segments"] = [s for s in script["segments"] if s["id"] not in bad_ids]
-        all_issues.append({"rule": "DROP-SEG", "level": "info",
-                           "hit": f"剔除条目 {dropped_refs} / 辅助段 {dropped_aux}"})
+        drops = {"rule": "DROP-SEG", "level": "info",
+                 "hit": f"剔除条目 {dropped_refs} / 辅助段 {dropped_aux}"}
         # 关键：剔除后对剩余段落重判，丢掉已剔除段落的旧 issue——
         # 否则残留的 block 会把本可发布的稿子误判成拒稿
-        all_issues = []
+        all_issues = [drops]                        # 保留剔除记录供审计
         for seg in script["segments"]:
             for i in _check_segment(seg, item_sources):
                 all_issues.append(dict(i, seg=seg["id"]))

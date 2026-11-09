@@ -5,6 +5,7 @@
 逐段合成 audio/segNN.wav（44.1k mono），断点续跑按文件存在跳过。
 """
 import asyncio
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,12 @@ import requests
 
 from src import ffmpeg, scriptgen, store
 from src.config import api_keys, load_config
+
+
+def _audio_key(seg: dict) -> str:
+    """音频缓存键 = 段号 + 文案哈希：稿子改了就绝不会复用旧音频。"""
+    h = hashlib.md5(seg["narration"].encode("utf-8")).hexdigest()[:8]
+    return f"{seg['id']}_{h}"
 
 ZHIPU_SPEECH_URL = "https://open.bigmodel.cn/api/paas/v4/audio/speech"
 
@@ -64,11 +71,11 @@ def _synth_cosy_batch(segs: list, audio_dir: Path, cosy_cfg: dict) -> list[Path]
     jobs = []
     outs = []
     for s in segs:
-        dst = audio_dir / f"{s['id']}.wav"
+        dst = audio_dir / f"{_audio_key(s)}.wav"
         outs.append(dst)
         if dst.exists():
             continue
-        mp3 = audio_dir / f"{s['id']}_cosy.wav"
+        mp3 = audio_dir / f"{_audio_key(s)}_cosy.wav"
         jobs.append({**base, "text": s["narration"],
                      "out": str(mp3.resolve())})
     if jobs:
@@ -103,16 +110,16 @@ def voice(pid: str) -> dict:
             backend = ""                                  # 降级逐段链路
 
     for s in script["segments"]:
-        wav = audio_dir / f"{s['id']}.wav"
+        wav = audio_dir / f"{_audio_key(s)}.wav"
         if wav.exists():
             continue
         if backend == "cosy":
-            src = audio_dir / f"{s['id']}_cosy.wav"   # 批量产物 → 统一规范 wav
+            src = audio_dir / f"{_audio_key(s)}_cosy.wav"  # 批量产物 → 统一规范 wav
             if not src.exists():
                 raise RuntimeError(f"段 {s['id']} cosy 产物缺失: {src}")
             _to_wav(src, wav)
             continue
-        mp3 = audio_dir / f"{s['id']}.mp3"
+        mp3 = audio_dir / f"{_audio_key(s)}.mp3"
         if not mp3.exists():
             errs = []
             try:
@@ -135,7 +142,7 @@ def voice(pid: str) -> dict:
 
     segs_out = []
     for s in script["segments"]:
-        wav = audio_dir / f"{s['id']}.wav"
+        wav = audio_dir / f"{_audio_key(s)}.wav"
         segs_out.append({"id": s["id"], "wav": str(wav),
                          "duration": round(ffmpeg.probe_duration(wav), 3)})
     result = {"backend": backend or "cache", "segments": segs_out}

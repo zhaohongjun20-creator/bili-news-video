@@ -104,11 +104,19 @@ def cmd_reject(a) -> None:
 
 
 def cmd_publish_prepare(a) -> None:
-    if review.status(a.pid) != "ready":
-        _die("未审片放行（approve）前不准备投稿物料——发布永远人工触发")
+    st = review.status(a.pid)
+    if st not in ("ready", "draft"):
+        _die(f"审片状态为 {st}（已退稿/已发布），先 reset 或另开一期")
+    if st != "ready":
+        print("提示：尚未 approve，物料仅供预览；publish 仍要求先放行")
     p = publisher.prepare(a.pid)
     print(f"上传物料: {p}")
-    print(f"下一步: python cli.py publish {a.pid} 真正投稿")
+    print(f"看片放行后: python cli.py approve {a.pid} && python cli.py publish {a.pid}")
+
+
+def cmd_reset(a) -> None:
+    review.reset(a.pid, a.note or "")
+    print(f"{a.pid}: 已回到 draft")
 
 
 def cmd_publish(a) -> None:
@@ -156,6 +164,10 @@ def main() -> None:
     p.add_argument("pid")
     p.add_argument("--note", default="")
     p.set_defaults(func=cmd_reject)
+    p = sub.add_parser("reset")
+    p.add_argument("pid")
+    p.add_argument("--note", default="")
+    p.set_defaults(func=cmd_reset)
     p = sub.add_parser("publish-prepare")
     p.add_argument("pid")
     p.set_defaults(func=cmd_publish_prepare)

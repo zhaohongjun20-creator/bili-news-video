@@ -32,6 +32,21 @@ def qc(pid: str) -> dict:
         problems.append(f"平均响度过低 {mv:.1f}dB（疑似静音轨）")
     if mv > cfg["qc"]["max_volume_db"]:
         problems.append(f"削波风险 {mv:.1f}dB")
+
+    # 语速启发式：音频时长 vs 文案字数（约4.5字/秒 ±45%容差）。
+    # 抓「字幕是A内容、音频是B内容」的缓存错配——规格指标查不出这种错。
+    script = load_json(store.project_dir(pid) / "script.json") or {}
+    voice = load_json(store.project_dir(pid) / "voice.json") or {}
+    dur = {s["id"]: s["duration"] for s in voice.get("segments", [])}
+    for seg in script.get("segments", []):
+        d = dur.get(seg["id"])
+        if not d:
+            continue
+        est = max(1.5, len(seg["narration"]) / 4.5)
+        if not (est * 0.55 <= d <= est * 1.45):
+            problems.append(f"段 {seg['id']} 音画疑似错配：音频 {d:.1f}s vs "
+                            f"文案约 {est:.1f}s（字数 {len(seg['narration'])}）")
+
     if not (store.project_dir(pid) / "output" / "subs.ass").exists():
         problems.append("字幕文件缺失")
     if not Path(rj["cover"]).exists():

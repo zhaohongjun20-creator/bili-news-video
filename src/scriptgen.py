@@ -6,6 +6,7 @@
 口播语速按 4.5 字/秒估算段时长，配音后以实测音频时长为准。
 """
 import datetime as _dt
+import re
 
 from src import ingest, redlines, store
 from src.config import api_keys, load_config
@@ -84,16 +85,19 @@ def _template_script(brief: dict, cfg: dict) -> dict:
     """无 GLM 降级：确定性拼稿。句子模板本身就按红线设计。"""
     show = cfg["show"]["name"]
     d = _dt.date.fromisoformat(brief["date"])
-    n = len(brief["items"])
+    excluded = set(brief.get("excluded_refs", []))   # 简报编辑判断：只上动态/不适合成片的条目
+    items = [it for i, it in enumerate(brief["items"], 1) if i not in excluded]
+    n = len(items)
     segs: list[dict] = []
-    hook = (f"{d.month}月{d.day}日，{show}第{n}条。今天带你看"
-            + (brief["items"][0].get("title", "最新动态") if n else "主线动向")
-            + "。两分钟，只讲事实和各方说法。")
+    hook = (f"{d.month}月{d.day}日，{show}，本期{n}条动态。今天带你看"
+            + (items[0].get("title", "最新动态") if n else "主线动向")
+            + "。只讲事实和各方说法。")
     segs.append({"kind": "hook", "narration": hook, "item_ref": 0,
                  "card": _card("hook", None)})
-    for i, it in enumerate(brief["items"], 1):
+    for i, it in enumerate(items, 1):
         tier = (it.get("sources") or [{}])[0].get("tier", "主流媒体")
-        parts = [f"第{i}条，{it.get('title', '')}。"]
+        title = re.sub(r"【[^】]*】", "", it.get("title", "")).strip()
+        parts = [f"第{i}条，{title}。"]
         if tier == "单方声称待核实":
             parts.append(f"据单方面说法：{it.get('summary', '')}，尚待核实。")
         else:
@@ -148,19 +152,21 @@ def _validate(obj: dict, n_items: int) -> bool:
 
 def build_script(pid: str) -> dict:
     brief = ingest.load_briefing(pid)
+    excluded = set(brief.get("excluded_refs", []))
+    active_items = [it for i, it in enumerate(brief["items"], 1) if i not in excluded]
     cfg = load_config()
-    target_s = max(60, min(200, int(len(brief["items"]) * 32 + 24)))
+    target_s = max(60, min(200, int(len(active_items) * 32 + 24)))
 
     script = None
     key = api_keys()["zhipu"]
-    if key and brief["items"]:
+    if key and active_items:
         obj, _ = chat_json_ex(
             key, _PROMPT.format(show=cfg["show"]["name"], target_s=target_s,
                                 brief=_brief_digest(brief)),
             model=cfg["glm"]["model"], temperature=cfg["glm"]["temperature"],
             max_tokens=cfg["glm"]["max_tokens"], timeout=cfg["glm"]["timeout_s"],
             required_keys=("title", "segments"))
-        if obj is not None and _validate(obj, len(brief["items"])):
+        if obj is not None and _validate(obj, len(active_items)):
             script = obj
     mode = "glm"
     if script is None:
@@ -187,11 +193,12 @@ def build_script(pid: str) -> dict:
 
 def _brief_digest(brief: dict) -> str:
     import json as _j
+    excluded = set(brief.get("excluded_refs", []))
     slim = {"date": brief["date"], "region": brief.get("region", ""),
             "items": [{k: it.get(k, "") for k in
                        ("title", "summary", "chess", "china_link", "risk")}
                       | {"sources": it.get("sources", [])}
-                      for it in brief["items"]],
+                      for i, it in enumerate(brief["items"], 1) if i not in excluded],
             "mainlines": brief.get("mainlines", [])}
     return _j.dumps(slim, ensure_ascii=False)
 

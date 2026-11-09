@@ -77,6 +77,25 @@ def _rule_parse(md: str) -> dict:
             "nothing_to_report": nothing and not items}
 
 
+def _normalize_tiers(briefing: dict) -> dict:
+    """简报方 tier 写法各异（官方声明/OSINT分析/需交叉验证…），归一到四级：
+    官方 | 主流媒体 | 区域专家 | 单方声称待核实。匹配不到的从严归「待核实」。"""
+    rules = (("单方声称待核实", ("需交叉验证", "未经证实", "传言", "待核实", "线索", "建议补核")),
+             ("区域专家", ("区域专家", "专家", "OSINT", "智库", "分析")),
+             ("主流媒体", ("主流媒体", "媒体", "通讯社", "报纸", "电视")),
+             ("官方", ("官方", "政府", "欧委会", "声明", "公告")))
+    for it in briefing.get("items", []):
+        for s in it.get("sources", []):
+            raw = str(s.get("tier", ""))
+            tier = ""
+            for canonical, keys in rules:
+                if any(k.lower() in raw.lower() for k in keys):
+                    tier = canonical
+                    break
+            s["tier"] = tier or "单方声称待核实"      # 不认识的从严处理
+    return briefing
+
+
 def ingest(briefing_md_path, pid_hint_date: str = "") -> tuple[str, dict]:
     """读取简报原文 → 建项目 → 写 briefing.json。返回 (pid, briefing)。"""
     md_path = __import__("pathlib").Path(briefing_md_path)
@@ -87,9 +106,10 @@ def ingest(briefing_md_path, pid_hint_date: str = "") -> tuple[str, dict]:
     key = api_keys()["zhipu"]
     if key:
         obj, _ = chat_json_ex(
-            key, _PROMPT.format(brief=raw[:8000]),
+            key, _PROMPT.format(brief=raw[:20000]),
             model=cfg["glm"]["model"], temperature=0.1,
-            max_tokens=cfg["glm"]["max_tokens"], timeout=cfg["glm"]["timeout_s"],
+            max_tokens=max(6000, cfg["glm"]["max_tokens"]),
+            timeout=cfg["glm"]["timeout_s"],
             required_keys=REQUIRED)
         if obj is not None:
             obj.setdefault("region", "巴尔干")
@@ -100,6 +120,7 @@ def ingest(briefing_md_path, pid_hint_date: str = "") -> tuple[str, dict]:
     if briefing is None:
         briefing = _rule_parse(raw)
         mode = "rule_fallback"
+    briefing = _normalize_tiers(briefing)
 
     if pid_hint_date:
         briefing["date"] = pid_hint_date

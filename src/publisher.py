@@ -12,6 +12,7 @@ from src.jsonio import load_json, save_json
 
 
 def prepare(pid: str) -> Path:
+    """生成 upload_info.txt。draft 阶段即可预览物料；真正投稿闸门在 publish（须 ready）。"""
     cfg = load_config()
     pdir = store.project_dir(pid)
     script = load_json(pdir / "script.json") or {}
@@ -23,8 +24,9 @@ def prepare(pid: str) -> Path:
 
     date = script.get("meta", {}).get("date", brief.get("date", ""))
     title = script.get("title") or f"{cfg['show']['name']} {date}"
-    item_titles = [it.get("title", "") for it in brief.get("items", [])
-                   if it.get("title")]
+    excluded = set(brief.get("excluded_refs", []))
+    item_titles = [it.get("title", "") for i, it in enumerate(brief.get("items", []), 1)
+                   if i not in excluded and it.get("title")]
     tiers = sorted({s.get("tier") for it in brief.get("items", [])
                     for s in it.get("sources", []) if s.get("tier")})
 

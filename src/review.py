@@ -20,6 +20,11 @@ def reject(pid: str, note: str = "") -> dict:
     return _set(pid, "rejected", note)
 
 
+def reset(pid: str, note: str = "") -> dict:
+    """退回 draft（审片状态误操作/需重审时用）。"""
+    return _set(pid, "draft", note)
+
+
 def _set(pid: str, st: str, note: str) -> dict:
     r = load_json(store.project_dir(pid) / "review.json") or {"history": []}
     r["status"] = st
