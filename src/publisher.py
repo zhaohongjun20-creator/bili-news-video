@@ -32,7 +32,7 @@ def prepare(pid: str) -> Path:
         f"标题: {title}",
         f"备选标题: {date} 巴尔干发生了什么｜本期{len(item_titles)}条",
         "",
-        f"分区: {cfg['publish']['category']}（资讯·国际）",
+        f"分区: tid {cfg['publish'].get('tid', 228)}（知识·时事）",
         f"标签: {','.join(cfg['publish']['tags'])}",
         f"封面: {rj.get('cover', '')}",
         f"成片: {rj.get('final', '')}",

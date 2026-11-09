@@ -103,12 +103,29 @@ def cmd_reject(a) -> None:
     print(f"{a.pid}: 已退稿。理由已记录")
 
 
-def cmd_publish(a) -> None:
+def cmd_publish_prepare(a) -> None:
     if review.status(a.pid) != "ready":
         _die("未审片放行（approve）前不准备投稿物料——发布永远人工触发")
     p = publisher.prepare(a.pid)
     print(f"上传物料: {p}")
-    print("投稿请人工执行（biliup 或网页上传），本期产线到此为止")
+    print(f"下一步: python cli.py publish {a.pid} 真正投稿")
+
+
+def cmd_publish(a) -> None:
+    from src import uploader
+    if not uploader.check_account():
+        _die("B站登录态缺失/过期。先运行: python cli.py login 扫码")
+    try:
+        r = uploader.publish(a.pid)
+    except RuntimeError as e:
+        _die(str(e))
+    print(f"{a.pid}: 投稿成功 {r['url'] or '(biliup 无返回 BV 号，去创作中心确认)'}")
+    print("审核通过后公开可见；如需撤回请在创作中心操作")
+
+
+def cmd_login(_a) -> None:
+    from src import uploader
+    uploader.login()
 
 
 def main() -> None:
@@ -141,7 +158,11 @@ def main() -> None:
     p.set_defaults(func=cmd_reject)
     p = sub.add_parser("publish-prepare")
     p.add_argument("pid")
+    p.set_defaults(func=cmd_publish_prepare)
+    p = sub.add_parser("publish")
+    p.add_argument("pid")
     p.set_defaults(func=cmd_publish)
+    sub.add_parser("login").set_defaults(func=cmd_login)
     args = ap.parse_args()
     args.func(args)
 

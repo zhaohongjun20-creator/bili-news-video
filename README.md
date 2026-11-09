@@ -37,7 +37,13 @@ python cli.py redo ep-001 voice               # 某阶段起重跑
 python cli.py show ep-001                     # 状态/锤稿问题/QC 一览
 python cli.py approve ep-001                  # 人工看片放行
 python cli.py publish-prepare ep-001          # 生成 upload_info.txt
+python cli.py publish ep-001                  # biliup 真实投稿（唯一出片动作）
+python cli.py login                           # B站扫码登录/续期（cookie 与 bili-autopost-sau 共用）
 ```
+
+投稿走 `bili-autopost-sau/sau_bridge.py` 的 biliup（自制·AI辅助，分区 tid 228
+知识·时事，config.yaml 可改）。**演示数据做的片子永远不要 publish**——卡面
+没有水印，发出去就是虚构时政新闻；简报带「勿直接发布」标记的直接跳过。
 
 联调/无网：`python cli.py make ep-001 --offline`（强制模板降级，配音仍需联网走 edge）。
 
