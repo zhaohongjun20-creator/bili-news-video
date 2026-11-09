@@ -184,6 +184,34 @@ def test_narration_lines():
     assert "".join(lines).startswith("第一句")
 
 
+# ---- 环境兼容：ffmpeg -i stderr 降级解析（无 ffprobe 路径） -------------
+def test_parse_video_spec_from_stderr():
+    import pytest
+    from src import ffmpeg
+    err = (
+        "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'final.mp4':\n"
+        "  Duration: 00:01:30.04, start: 0.000000, bitrate: 1512 kb/s\n"
+        "    Stream #0:0(und): Video: h264 (High) (avc1 / 0x31637661), "
+        "yuv420p(tv, bt709), 1920x1080 [SAR 1:1 DAR 16:9], 1349 kb/s, "
+        "30 fps, 30 tbr, 30k tbn (default)\n"
+        "    Stream #0:1(und): Audio: aac (LC), 44100 Hz, stereo, fltp, "
+        "128 kb/s (default)\n")
+    spec = ffmpeg.parse_video_spec(err)
+    assert spec["width"] == 1920 and spec["height"] == 1080
+    assert spec["fps"] == pytest.approx(30.0)
+    assert ffmpeg.parse_duration(err) == pytest.approx(90.04)
+
+
+def test_parse_video_spec_garbage_and_edge():
+    from src import ffmpeg
+    assert ffmpeg.parse_video_spec("没有视频流的输出") == \
+        {"width": 0, "height": 0, "fps": 0.0}
+    # 音频流行（44100 Hz）不产生伪分辨率；无 fps 字样保持零值
+    err = "Stream #0:1: Audio: aac, 44100 Hz, stereo\n"
+    assert ffmpeg.parse_video_spec(err) == {"width": 0, "height": 0, "fps": 0.0}
+    assert ffmpeg.parse_duration("nothing useful") is None
+
+
 # ---- 发布安全：redo 作废旧审片 ----------------------------------------
 def _fake_project(tmp_path, monkeypatch, status="ready"):
     """造一个隔离的 ep-999 项目（不碰真实 projects/）。"""

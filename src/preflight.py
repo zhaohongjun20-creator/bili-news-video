@@ -4,7 +4,7 @@ import shutil
 
 from src import narrator
 from src.config import api_keys, load_config
-from src.ffmpeg import ffmpeg_exe
+from src.ffmpeg import ffmpeg_exe, ffprobe_exe
 
 
 def doctor(_cfg: dict | None = None) -> list[tuple[str, str, str]]:
@@ -15,6 +15,13 @@ def doctor(_cfg: dict | None = None) -> list[tuple[str, str, str]]:
         rows.append(("ok", "ffmpeg", "PATH 可用"))
     else:
         rows.append(("ok", "ffmpeg", f"imageio 兜底: {ffmpeg_exe()[:48]}…"))
+
+    if ffprobe_exe():
+        rows.append(("ok", "ffprobe", "PATH 可用（规格/时长探测走主路）"))
+    else:
+        rows.append(("soft", "ffprobe",
+                     "缺失：probe 降级为 ffmpeg -i stderr 解析"
+                     "（时长/分辨率/帧率，QC 精度略降但可用）"))
 
     from pathlib import Path
     for f in ("msyh.ttc", "msyhbd.ttc"):

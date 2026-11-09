@@ -22,6 +22,17 @@ def run(cmd: list, timeout: int = 1800,
                           text=True, timeout=timeout, cwd=cwd)
 
 
+_DURATION = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+
+def parse_duration(stderr: str) -> float | None:
+    """纯函数：从 `ffmpeg -i` 的 stderr 解析时长（秒）；解析不到返回 None。"""
+    if m := _DURATION.search(stderr):
+        h, mi, s = m.groups()
+        return int(h) * 3600 + int(mi) * 60 + float(s)
+    return None
+
+
 def probe_duration(path) -> float:
     """音频/视频时长（秒）。ffprobe 优先，失败退回 ffmpeg -i stderr 解析。"""
     p = Path(path)
@@ -33,13 +44,32 @@ def probe_duration(path) -> float:
             return float(r.stdout.strip())
         except ValueError:
             pass
-    r = run([ffmpeg_exe(), "-i", p])
-    err = r.stderr or ""
-    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", err)
-    if m:
-        h, mi, s = m.groups()
-        return int(h) * 3600 + int(mi) * 60 + float(s)
+    err = (run([ffmpeg_exe(), "-i", p]).stderr or "")
+    d = parse_duration(err)
+    if d is not None:
+        return d
     raise RuntimeError(f"无法探测时长: {p} :: {err[:200]}")
+
+
+def parse_video_spec(stderr: str) -> dict:
+    """纯函数：从 `ffmpeg -i` 的 stderr 解析视频规格（无 ffprobe 的降级路径）。
+
+    分辨率取 Video 流行里的 \\d{3,5}x\\d{3,5}，帧率取同行的 `N fps`。
+    解析不到的字段保持零值（width=0/height=0/fps=0.0），由上层 QC 判定。
+    """
+    spec = {"width": 0, "height": 0, "fps": 0.0}
+    for ln in stderr.splitlines():
+        if "Video:" not in ln:
+            continue
+        if m := re.search(r"\b(\d{3,5})x(\d{3,5})\b", ln):
+            spec["width"], spec["height"] = int(m.group(1)), int(m.group(2))
+        if m := re.search(r"([\d.]+)\s*fps", ln):
+            try:
+                spec["fps"] = round(float(m.group(1)), 2)
+            except ValueError:
+                pass
+        break                                     # 只认第一条视频流
+    return spec
 
 
 def probe_video(path) -> dict:
@@ -69,7 +99,12 @@ def probe_video(path) -> dict:
                 except (ValueError, ZeroDivisionError):
                     pass
         return info
-    info["duration"] = probe_duration(p)
+    # 无 ffprobe：一次 `ffmpeg -i`，时长与分辨率/帧率都从 stderr 降级解析
+    err = (run([ffmpeg_exe(), "-i", p]).stderr or "")
+    info["duration"] = parse_duration(err)
+    if info["duration"] is None:
+        info["duration"] = probe_duration(p)
+    info.update(parse_video_spec(err))
     return info
 
 
