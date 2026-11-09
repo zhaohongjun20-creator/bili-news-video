@@ -141,20 +141,27 @@ def _template_script(brief: dict, cfg: dict) -> dict:
 def _validate(obj: dict, refs: set[int]) -> bool:
     """结构校验（精确覆盖）：hook 开场、outro 收尾、item 段与有效条目
     （excluded_refs 剔除后的 ref 集合）严格一一对应——
-    ① item 段数 == 有效条目数；② item_ref 唯一且恰好全覆盖 refs；
-    ③ item 段 card.headline 非空。任一不满足 → 模板降级。
-    GLM 退化稿（漏条目/重复 ref/空标题/把内容塞进别的段）一律打回。"""
+    ① 每段必须是 dict；② hook 恰好 1 个且在首段、outro 恰好 1 个且在末段；
+    ③ item_ref 必须是整数（禁布尔——Python 里 {True}=={1} 会漏网）、
+    唯一且恰好全覆盖 refs；④ item 段 card.headline 非空。任一不满足 → 模板降级。"""
     segs = obj.get("segments")
     if not isinstance(segs, list) or not segs:
         return False
+    if not all(isinstance(s, dict) for s in segs):
+        return False
     kinds = [s.get("kind") for s in segs]
     if kinds[0] != "hook" or kinds[-1] != "outro":
+        return False
+    if kinds.count("hook") != 1 or kinds.count("outro") != 1:
         return False
     unknown = set(kinds) - {"hook", "item", "china", "mainline", "outro"}
     if unknown:
         return False
     item_segs = [s for s in segs if s.get("kind") == "item"]
     got = [s.get("item_ref") for s in item_segs]
+    # 布尔是 int 子类，{True}=={1} 会让 True 冒充条目 1——显式拒绝
+    if any(not isinstance(r, int) or isinstance(r, bool) for r in got):
+        return False
     if len(got) != len(set(got)) or set(got) != set(refs):
         return False
     if any(not str((s.get("card") or {}).get("headline") or "").strip()
