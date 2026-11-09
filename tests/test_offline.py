@@ -538,3 +538,191 @@ def test_publish_happy_path_through_gate(tmp_path, monkeypatch):
     assert r["bvid"] == "BV1FAKE00000"
     assert calls["upload"] == 1
 
+
+
+# ---- 第三轮 P1-A：已投稿项目防重复放行/重复投稿 ---------------------------
+def _publish_once(tmp_path, monkeypatch):
+    """夹具：有效项目 → 放行 → 首次投稿成功（stub，不触网）。返回 (pdir, calls)。"""
+    from src import review, uploader
+    calls = _stub_sau(monkeypatch)
+    pdir = _fake_release(tmp_path, monkeypatch)
+    (pdir / "output" / "upload_info.txt").write_text(
+        "标题: t\n简介:\n简介内容够长\n", encoding="utf-8")
+    review.approve("ep-999", "首次放行")
+    uploader.publish("ep-999")
+    return pdir, calls
+
+
+def test_published_cannot_reapprove(tmp_path, monkeypatch):
+    """published 是终态：底层 approve 直接拒绝（重复放行=重复投稿风险）。"""
+    import pytest
+    from src import review
+    _publish_once(tmp_path, monkeypatch)
+    assert review.status("ep-999") == "published"
+    with pytest.raises(RuntimeError, match="重复放行"):
+        review.approve("ep-999", "再次放行")
+
+
+def test_cmd_approve_rejects_published(tmp_path, monkeypatch):
+    """CLI 层对已投稿项目的 approve 也要拦（双层防御）。"""
+    import argparse
+    import pytest
+    import cli
+    _publish_once(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit):
+        cli.cmd_approve(argparse.Namespace(pid="ep-999", note="再放行"))
+
+
+def test_published_cannot_republish_zero_uploads(tmp_path, monkeypatch):
+    """重复 publish 必须拒绝，且不再产生任何上传调用。"""
+    import pytest
+    from src import uploader
+    pdir, calls = _publish_once(tmp_path, monkeypatch)
+    assert calls["upload"] == 1
+    with pytest.raises(RuntimeError, match="已投稿"):
+        uploader.publish("ep-999")
+    assert calls["upload"] == 1            # 重投尝试：0 次上传
+
+
+def test_publish_failure_leaves_no_success_record(tmp_path, monkeypatch):
+    """上传抛错：审片状态保持 ready，绝不写入成功记录。"""
+    import pytest
+    import sys
+    from src import review, uploader
+    pdir, _calls = _publish_once.__wrapped__(tmp_path, monkeypatch) if False else (None, None)
+    calls = _stub_sau(monkeypatch)
+    pdir = _fake_release(tmp_path, monkeypatch)
+    (pdir / "output" / "upload_info.txt").write_text(
+        "标题: t\n简介:\n简介内容够长\n", encoding="utf-8")
+    sys.modules["sau_bridge"].upload = _fail_upload
+    review.approve("ep-999", "放行")
+    with pytest.raises(RuntimeError, match="biliup"):
+        uploader.publish("ep-999")
+    assert review.status("ep-999") == "ready"
+    assert not (pdir / "output" / "publish_result.json").exists()
+
+
+def _fail_upload(**_kw):
+    raise RuntimeError("biliup failed: cookie expired")
+
+
+def test_publish_fingerprint_blocks_same_video_allows_new(tmp_path, monkeypatch):
+    """持久化指纹闸门：同成片（即使状态被改回 draft）拒绝重投；
+    成片变了（redo 重做的新片）→ 不因旧记录误拒，走正常流程。"""
+    import pytest
+    from src import review, uploader
+    from src.jsonio import load_json
+    pdir, calls = _publish_once(tmp_path, monkeypatch)
+    rec = load_json(pdir / "output" / "publish_result.json")
+    assert rec["video"]["sha256_16"]       # 指纹随投稿成功持久化
+    review.reset("ep-999", "测试：状态回 draft，投稿记录仍在")
+    with pytest.raises(RuntimeError, match="已投稿过"):
+        uploader.publish("ep-999")         # 同指纹 → 拒
+    assert calls["upload"] == 1
+    final = pdir / "output" / "final.mp4"
+    final.write_bytes(final.read_bytes() + b"redo-new-version")
+    with pytest.raises(RuntimeError, match="approve"):
+        uploader.publish("ep-999")         # 新成片 → 越过指纹闸，卡在未放行
+    assert calls["upload"] == 1
+
+
+# ---- 第三轮 P1-B：ffprobe OSError/超时也走降级 ---------------------------
+def test_probe_video_ffprobe_oserror_falls_back(monkeypatch):
+    import pytest
+    from src import ffmpeg
+    monkeypatch.setattr(ffmpeg, "ffprobe_exe", lambda: "ffprobe")
+
+    def fake_run(cmd, **kw):
+        if "ffprobe" in str(cmd[0]):
+            raise OSError("ffprobe binary broken")
+        return _FakeRet(stderr=_STDERR_OK)
+    monkeypatch.setattr(ffmpeg, "run", fake_run)
+    info = ffmpeg.probe_video("x.mp4")
+    assert (info["width"], info["height"]) == (1920, 1080)
+
+
+def test_probe_video_ffprobe_timeout_falls_back(monkeypatch):
+    import subprocess
+    from src import ffmpeg
+    monkeypatch.setattr(ffmpeg, "ffprobe_exe", lambda: "ffprobe")
+
+    def fake_run(cmd, **kw):
+        if "ffprobe" in str(cmd[0]):
+            raise subprocess.TimeoutExpired(cmd="ffprobe", timeout=60)
+        return _FakeRet(stderr=_STDERR_OK)
+    monkeypatch.setattr(ffmpeg, "run", fake_run)
+    info = ffmpeg.probe_video("x.mp4")
+    assert info["height"] == 1080
+
+
+def test_probe_duration_ffprobe_crash_falls_back(monkeypatch):
+    import pytest
+    from src import ffmpeg
+    monkeypatch.setattr(ffmpeg, "ffprobe_exe", lambda: "ffprobe")
+
+    def fake_run(cmd, **kw):
+        if "ffprobe" in str(cmd[0]):
+            raise OSError("no exec")
+        return _FakeRet(stderr=_STDERR_OK)
+    monkeypatch.setattr(ffmpeg, "run", fake_run)
+    assert ffmpeg.probe_duration("x.mp4") == pytest.approx(90.04)
+
+
+def test_probe_video_garbage_file_raises_for_real(tmp_path):
+    """真实损坏文件（不 mock）：ffprobe 与 ffmpeg 两路都失败 → 明确报错。"""
+    import pytest
+    from src import ffmpeg
+    bad = tmp_path / "garbage.mp4"
+    bad.write_bytes(b"\x00\x01\x02not a video at all" * 64)
+    with pytest.raises(RuntimeError):
+        ffmpeg.probe_video(bad)
+
+
+# ---- 第三轮 P2-A：逐字稿结构校验加固 ------------------------------------
+def test_validate_item_ref_must_be_int_not_bool():
+    """{True}=={1} 的 Python 陷阱：布尔 item_ref 必须显式拒绝；字符串同样拒。"""
+    from src import scriptgen
+    refs = {1, 2}
+    s = _script_with([1, 2])
+    s["segments"][1]["item_ref"] = True
+    assert not scriptgen._validate(s, refs)
+    s2 = _script_with([1, 2])
+    s2["segments"][1]["item_ref"] = "1"
+    assert not scriptgen._validate(s2, refs)
+    assert scriptgen._validate(_script_with([1, 2]), refs)   # 正常整数仍通过
+
+
+def test_validate_hook_outro_exactly_once():
+    """hook/outro 各恰好一次（中间混入即拒）。"""
+    from src import scriptgen
+    refs = {1, 2}
+    s = _script_with([1, 2])
+    s["segments"].insert(2, {"kind": "hook",
+                             "narration": "中间又插了一个钩子段", "card": {}})
+    assert not scriptgen._validate(s, refs)
+    s2 = _script_with([1, 2])
+    s2["segments"].insert(2, {"kind": "outro",
+                              "narration": "中间又插了一个收尾段", "card": {}})
+    assert not scriptgen._validate(s2, refs)
+
+
+def test_validate_rejects_malformed_segments():
+    """缺 narration、非 dict 段落都要拒（旧实现对后者会直接崩）。"""
+    from src import scriptgen
+    refs = {1, 2}
+    s = _script_with([1, 2])
+    del s["segments"][1]["narration"]
+    assert not scriptgen._validate(s, refs)
+    s2 = _script_with([1, 2])
+    s2["segments"][1] = "not-a-dict"
+    assert not scriptgen._validate(s2, refs)
+
+
+# ---- 第三轮 P2-B：俄罗斯触发词收紧（单字「俄」误触发） -------------------
+def test_actor_russia_triggers_precise():
+    from src import cards
+    assert cards.external_actors("俄罗斯政府表示不接受该安排。") == ["俄罗斯"]
+    assert cards.external_actors("俄方回应称报道不实。") == ["俄罗斯"]
+    assert cards.external_actors("俄军在边境地区展开演习。") == ["俄罗斯"]
+    assert cards.external_actors("一份俄语资料显示了不同的数字。") == []
+    assert cards.external_actors("今天没有任何外围动向。") == []
