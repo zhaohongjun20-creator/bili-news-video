@@ -33,17 +33,28 @@ def parse_duration(stderr: str) -> float | None:
     return None
 
 
+def _ffprobe_run(args: list) -> subprocess.CompletedProcess | None:
+    """执行一次 ffprobe；启动失败（OSError）或超时（TimeoutExpired）
+    视为 ffprobe 不可用，返回 None 由调用方走 stderr 降级。
+    非零返回码不算异常，原样交调用方判断。"""
+    try:
+        return run(args, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def probe_duration(path) -> float:
     """音频/视频时长（秒）。ffprobe 优先，失败退回 ffmpeg -i stderr 解析。"""
     p = Path(path)
     pp = ffprobe_exe()
     if pp:
-        r = run([pp, "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", p])
-        try:
-            return float(r.stdout.strip())
-        except ValueError:
-            pass
+        r = _ffprobe_run([pp, "-v", "error", "-show_entries", "format=duration",
+                          "-of", "default=noprint_wrappers=1:nokey=1", p])
+        if r is not None:
+            try:
+                return float(r.stdout.strip())
+            except ValueError:
+                pass
     err = (run([ffmpeg_exe(), "-i", p]).stderr or "")
     d = parse_duration(err)
     if d is not None:
@@ -81,10 +92,10 @@ def probe_video(path) -> dict:
     pp = ffprobe_exe()
     info = {"duration": 0.0, "width": 0, "height": 0, "fps": 0.0}
     if pp:
-        r = run([pp, "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height,r_frame_rate:format=duration",
-                 "-of", "default=noprint_wrappers=1", p])
-        if r.returncode == 0 and "width=" in (r.stdout or ""):
+        r = _ffprobe_run([pp, "-v", "error", "-select_streams", "v:0",
+                          "-show_entries", "stream=width,height,r_frame_rate:format=duration",
+                          "-of", "default=noprint_wrappers=1", p])
+        if r is not None and r.returncode == 0 and "width=" in (r.stdout or ""):
             for line in (r.stdout or "").splitlines():
                 k, _, v = line.partition("=")
                 if k == "width":
@@ -127,13 +138,14 @@ def stderr_has_audio(stderr: str) -> bool:
 
 
 def has_audio_stream(path) -> bool:
-    """媒体是否含音轨。ffprobe 查流；无 ffprobe 时从 ffmpeg -i stderr 找 Audio 流行。"""
+    """媒体是否含音轨。ffprobe 查流；ffprobe 异常/缺失时从 ffmpeg -i stderr 找 Audio 流行。"""
     p = Path(path)
     pp = ffprobe_exe()
     if pp:
-        r = run([pp, "-v", "error", "-select_streams", "a",
-                 "-show_entries", "stream=index", "-of", "csv=p=0", p])
-        return bool((r.stdout or "").strip())
+        r = _ffprobe_run([pp, "-v", "error", "-select_streams", "a",
+                          "-show_entries", "stream=index", "-of", "csv=p=0", p])
+        if r is not None:
+            return bool((r.stdout or "").strip())
     return stderr_has_audio(run([ffmpeg_exe(), "-i", p]).stderr or "")
 
 
