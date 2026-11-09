@@ -83,18 +83,79 @@ def test_template_script_structure():
 
 
 # ---- 锤稿检查 --------------------------------------------------------
+def _item_seg(ref: int, headline: str = "条目标题") -> dict:
+    return {"kind": "item", "item_ref": ref,
+            "narration": f"第{ref}条动态内容，官方口径如下。",
+            "card": {"headline": headline}}
+
+
+def _script_with(refs: list[int]) -> dict:
+    """构造恰好覆盖给定 ref 的稿子（hook + item×n + outro）。"""
+    segs = [{"kind": "hook", "narration": "开场钩子，今天三件事。", "card": {}}]
+    segs += [_item_seg(r) for r in refs]
+    segs.append({"kind": "outro", "narration": "不站队不预测，下期再见。", "card": {}})
+    return {"title": "t", "segments": segs}
+
+
 def test_validate_rejects_degenerate():
     """GLM 退化稿（3 条动态却没写 item 段）必须打回。"""
     bad = {"title": "t", "segments": [
         {"kind": "hook", "narration": "开场钩子，今天三件事。", "card": {}},
         {"kind": "china", "narration": "塞中项目的外溢影响需要关注。", "card": {}},
         {"kind": "outro", "narration": "不站队不预测，下期再见。", "card": {}}]}
-    assert not scriptgen._validate(bad, n_items=3)
+    assert not scriptgen._validate(bad, refs={1, 2, 3})
     good = {"title": "t", "segments": [
         {"kind": "hook", "narration": "开场钩子，今天一件事。", "card": {}},
-        {"kind": "item", "narration": "第一条动态内容，官方口径如下。", "card": {}},
+        _item_seg(1),
         {"kind": "outro", "narration": "不站队不预测，下期再见。", "card": {}}]}
-    assert scriptgen._validate(good, n_items=1)
+    assert scriptgen._validate(good, refs={1})
+
+
+def test_validate_exact_coverage():
+    """ref 乱序但恰好全覆盖 → 通过。"""
+    assert scriptgen._validate(_script_with([2, 1, 3]), refs={1, 2, 3})
+
+
+def test_validate_rejects_missing_ref():
+    """少一条：3 个有效条目只写了 2 段 → 打回模板降级。"""
+    assert not scriptgen._validate(_script_with([1, 2]), refs={1, 2, 3})
+
+
+def test_validate_rejects_duplicate_ref():
+    """重复 ref：段数凑够但 ref 重了、漏了另一条 → 打回。"""
+    assert not scriptgen._validate(_script_with([1, 2, 2]), refs={1, 2, 3})
+    # 段数、ref 集合都恰好，但内部有重复（漏一条重一条）也要打回
+    assert not scriptgen._validate(_script_with([1, 2, 2]), refs={1, 2})
+
+
+def test_validate_rejects_empty_headline():
+    """item 段 card.headline 为空 → 打回模板降级。"""
+    s = _script_with([1, 2, 3])
+    s["segments"][2]["card"]["headline"] = "   "
+    assert not scriptgen._validate(s, refs={1, 2, 3})
+    s["segments"][2].pop("card")                      # 卡片字段缺失同样打回
+    assert not scriptgen._validate(s, refs={1, 2, 3})
+
+
+def test_validate_refs_exclude_excluded():
+    """excluded_refs 剔除后的有效 ref 才算数：写了被剔除的条目反而打回。"""
+    assert not scriptgen._validate(_script_with([1, 2, 3]), refs={2, 3})
+    assert scriptgen._validate(_script_with([2, 3]), refs={2, 3})
+
+
+def test_valid_refs_and_template_alignment():
+    """valid_refs 与模板稿对齐：item_ref 用简报原始 ref，不因剔除重排。"""
+    brief = {"date": "2026-11-09", "region": "巴尔干", "excluded_refs": [1],
+             "items": [{"title": f"条目{i}", "summary": "发生了某事。",
+                        "sources": [{"tier": "官方", "name": "公告"}]}
+                       for i in (1, 2, 3)],
+             "mainlines": []}
+    refs = scriptgen.valid_refs(brief)
+    assert refs == {2, 3}
+    s = scriptgen._template_script(brief, load_config())
+    got = [seg["item_ref"] for seg in s["segments"] if seg["kind"] == "item"]
+    assert set(got) == refs and len(got) == len(refs)
+    assert scriptgen._validate(s, refs)               # 模板稿自身必须过精确覆盖
 
 
 def test_check_segment_requires_badge():

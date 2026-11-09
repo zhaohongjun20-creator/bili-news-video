@@ -48,7 +48,7 @@ item 段口播示范（信源分级必须念出来，每段 60-100 字）：
   "segments": [
     {{"kind": "hook|item|china|mainline|outro",
       "narration": "口播文本，口语化短句，不要书面长句",
-      "item_ref": 对应简报条目序号(1起)，非条目段为0,
+      "item_ref": 对应简报条目的 ref 字段（简报 items 里给出的 ref，1起），非条目段为0,
       "card": {{"type": "hook|headline|quote|map|china|mainline|outro",
                 "headline": "卡面大字（≤18字）",
                 "sub": "卡面副题（≤40字，可为空串）",
@@ -81,20 +81,30 @@ def _card(kind: str, it: dict | None) -> dict:
             "lines": ([it.get("chess", "")[:30]] if it.get("chess") else [])}
 
 
+def valid_refs(brief: dict) -> set[int]:
+    """有效条目 ref 集合：简报条目序号(1起)剔除 excluded_refs。
+
+    scriptgen 与 hammer 共用这一份定义——item 段的 item_ref 全链都以
+    简报原始序号为准，避免剔除条目后各环节序号错位。
+    """
+    excluded = set(brief.get("excluded_refs", []))
+    return {i for i in range(1, len(brief.get("items", [])) + 1)} - excluded
+
+
 def _template_script(brief: dict, cfg: dict) -> dict:
     """无 GLM 降级：确定性拼稿。句子模板本身就按红线设计。"""
     show = cfg["show"]["name"]
     d = _dt.date.fromisoformat(brief["date"])
-    excluded = set(brief.get("excluded_refs", []))   # 简报编辑判断：只上动态/不适合成片的条目
-    items = [it for i, it in enumerate(brief["items"], 1) if i not in excluded]
-    n = len(items)
+    kept = [(i, it) for i, it in enumerate(brief["items"], 1)
+            if i in valid_refs(brief)]              # item_ref 用原始 ref，不重排
+    n = len(kept)
     segs: list[dict] = []
     hook = (f"{d.month}月{d.day}日，{show}，本期{n}条动态。今天带你看"
-            + (items[0].get("title", "最新动态") if n else "主线动向")
+            + (kept[0][1].get("title", "最新动态") if n else "主线动向")
             + "。只讲事实和各方说法。")
     segs.append({"kind": "hook", "narration": hook, "item_ref": 0,
                  "card": _card("hook", None)})
-    for i, it in enumerate(items, 1):
+    for i, it in kept:
         tier = (it.get("sources") or [{}])[0].get("tier", "主流媒体")
         title = re.sub(r"【[^】]*】", "", it.get("title", "")).strip()
         parts = [f"第{i}条，{title}。"]
@@ -128,9 +138,12 @@ def _template_script(brief: dict, cfg: dict) -> dict:
             "warnings": ["模板降级稿：文案为确定性拼接，可直接用但较平"]}
 
 
-def _validate(obj: dict, n_items: int) -> bool:
-    """结构校验：hook 开场、outro 收尾、动态必须逐条成段——GLM 退化稿
-    （漏写 item 段、把内容塞进别的段）一律打回模板降级。"""
+def _validate(obj: dict, refs: set[int]) -> bool:
+    """结构校验（精确覆盖）：hook 开场、outro 收尾、item 段与有效条目
+    （excluded_refs 剔除后的 ref 集合）严格一一对应——
+    ① item 段数 == 有效条目数；② item_ref 唯一且恰好全覆盖 refs；
+    ③ item 段 card.headline 非空。任一不满足 → 模板降级。
+    GLM 退化稿（漏条目/重复 ref/空标题/把内容塞进别的段）一律打回。"""
     segs = obj.get("segments")
     if not isinstance(segs, list) or not segs:
         return False
@@ -140,10 +153,12 @@ def _validate(obj: dict, n_items: int) -> bool:
     unknown = set(kinds) - {"hook", "item", "china", "mainline", "outro"}
     if unknown:
         return False
-    n_items_segs = kinds.count("item")
-    if n_items > 0 and n_items_segs < max(1, min(n_items, 2)):
+    item_segs = [s for s in segs if s.get("kind") == "item"]
+    got = [s.get("item_ref") for s in item_segs]
+    if len(got) != len(set(got)) or set(got) != set(refs):
         return False
-    if n_items == 0 and n_items_segs > 0:
+    if any(not str((s.get("card") or {}).get("headline") or "").strip()
+           for s in item_segs):
         return False
     return all(isinstance(s.get("narration"), str) and len(s["narration"].strip()) >= 8
                for s in segs) \
@@ -152,21 +167,20 @@ def _validate(obj: dict, n_items: int) -> bool:
 
 def build_script(pid: str) -> dict:
     brief = ingest.load_briefing(pid)
-    excluded = set(brief.get("excluded_refs", []))
-    active_items = [it for i, it in enumerate(brief["items"], 1) if i not in excluded]
+    refs = valid_refs(brief)        # 有效条目 ref 集合（excluded_refs 剔除后）
     cfg = load_config()
-    target_s = max(60, min(200, int(len(active_items) * 32 + 24)))
+    target_s = max(60, min(200, int(len(refs) * 32 + 24)))
 
     script = None
     key = api_keys()["zhipu"]
-    if key and active_items:
+    if key and refs:
         obj, _ = chat_json_ex(
             key, _PROMPT.format(show=cfg["show"]["name"], target_s=target_s,
                                 brief=_brief_digest(brief)),
             model=cfg["glm"]["model"], temperature=cfg["glm"]["temperature"],
             max_tokens=cfg["glm"]["max_tokens"], timeout=cfg["glm"]["timeout_s"],
             required_keys=("title", "segments"))
-        if obj is not None and _validate(obj, len(active_items)):
+        if obj is not None and _validate(obj, refs):
             script = obj
     mode = "glm"
     if script is None:
@@ -195,8 +209,9 @@ def _brief_digest(brief: dict) -> str:
     import json as _j
     excluded = set(brief.get("excluded_refs", []))
     slim = {"date": brief["date"], "region": brief.get("region", ""),
-            "items": [{k: it.get(k, "") for k in
-                       ("title", "summary", "chess", "china_link", "risk")}
+            "items": [{"ref": i}
+                      | {k: it.get(k, "") for k in
+                         ("title", "summary", "chess", "china_link", "risk")}
                       | {"sources": it.get("sources", [])}
                       for i, it in enumerate(brief["items"], 1) if i not in excluded],
             "mainlines": brief.get("mainlines", [])}

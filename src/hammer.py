@@ -44,6 +44,7 @@ def _check_segment(seg: dict, item_sources: dict) -> list[dict]:
 def hammer(pid: str) -> dict:
     script = scriptgen.load_script(pid)
     brief = load_json(store.project_dir(pid) / "briefing.json") or {}
+    refs = scriptgen.valid_refs(brief)   # 有效条目 ref 集合（与 scriptgen 同一定义）
     items = {i + 1: it for i, it in enumerate(brief.get("items", []))}
     item_sources = {k: (v.get("sources") or [{}])[0].get("tier", "")
                     for k, v in items.items()}
@@ -81,7 +82,7 @@ def hammer(pid: str) -> dict:
                 model=cfg["glm"]["model"], temperature=0.3,
                 max_tokens=cfg["glm"]["max_tokens"], timeout=cfg["glm"]["timeout_s"],
                 required_keys=("title", "segments"))
-            if obj is not None and scriptgen._validate(obj, len(items)):
+            if obj is not None and scriptgen._validate(obj, refs):
                 script["segments"] = obj["segments"]
                 script["title"] = obj.get("title", script["title"])
                 script["meta"]["mode"] = "glm_repaired"
