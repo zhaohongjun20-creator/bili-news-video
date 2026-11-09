@@ -92,12 +92,18 @@ def cmd_show(a) -> None:
 
 
 def cmd_approve(a) -> None:
-    # 放行前置闸门：render/qc 阶段完成 + 成片真实存在 + QC 属于当前成片
-    # （旧 QC 残留、redo 后未重跑、QC 未过一律不放行）
+    if (store.project_dir(a.pid) / "output" / "final.mp4").exists() is False:
+        _die("还没有成片，先 make")
+    if review.status(a.pid) == "published":
+        _die("已投稿项目不可重复放行（重复投稿风险）。"
+             "如需重投：redo 生成新成片后重走全链")
     problems = review.gate(a.pid)
     if problems:
         _die("放行前置检查未过：" + "；".join(problems))
-    review.approve(a.pid, a.note or "")
+    try:
+        review.approve(a.pid, a.note or "")
+    except RuntimeError as e:
+        _die(str(e))
     print(f"{a.pid}: 已放行（ready）。下一步: publish-prepare")
 
 

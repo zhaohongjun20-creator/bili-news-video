@@ -47,6 +47,15 @@ def gate(pid: str) -> list[str]:
 
 
 def approve(pid: str, note: str = "") -> dict:
+    """放行。published 是终态：重复放行 = 重复投稿风险，底层直接拒绝
+    （CLI 层另有友好预检；如需重投，redo 生成新成片后重走全链）。"""
+    if status(pid) == "published":
+        rec = load_json(store.project_dir(pid) / "output" / "publish_result.json") or {}
+        url = rec.get("url") or (f"https://www.bilibili.com/video/{rec['bvid']}"
+                                 if rec.get("bvid") else "")
+        raise RuntimeError("已投稿项目不可重复放行"
+                           + (f"（已发布：{url}）" if url else "")
+                           + "。如需重投请 redo 后重新生成并审片")
     return _set(pid, "ready", note)
 
 

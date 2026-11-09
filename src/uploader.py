@@ -39,7 +39,38 @@ def _desc_from_upload_info(pid: str) -> str:
     return re.sub(r"\n（内部备忘，发布前删除）.*\Z", "", desc, flags=re.S).strip()
 
 
+def _video_fingerprint(path) -> dict:
+    """成片指纹（sha256 前 16 位 + size）：重复投稿判定的持久化依据。"""
+    import hashlib
+    p = Path(path)
+    return {"path": str(p), "size": p.stat().st_size,
+            "sha256_16": hashlib.sha256(p.read_bytes()).hexdigest()[:16]}
+
+
+def _already_published(pid: str) -> str:
+    """重复投稿守卫。返回拒绝原因，空串 = 可投：
+    ① 审片状态 published → 拒；
+    ② 有投稿成功记录且成片指纹一致（旧记录 + 同一成片）→ 拒；
+    ③ 有记录但成片已变（redo 重做的新片）→ 放行，走正常首次投稿流程。"""
+    rec = load_json(store.project_dir(pid) / "output" / "publish_result.json") or {}
+    if review.status(pid) == "published":
+        return ("本项目已投稿"
+                + (f"：{rec.get('url')}" if rec.get("url") else "")
+                + "，拒绝重复投稿（如需重投请 redo 后重新生成并审片）")
+    if rec.get("video"):
+        rj = load_json(store.project_dir(pid) / "output" / "render.json") or {}
+        final = rj.get("final", "")
+        if final and Path(final).exists() and _video_fingerprint(final) == rec["video"]:
+            return ("当前成片已投稿过"
+                    + (f"：{rec.get('url')}" if rec.get("url") else "")
+                    + "（成片指纹一致），拒绝重复投稿")
+    return ""
+
+
 def publish(pid: str) -> dict:
+    dup = _already_published(pid)
+    if dup:
+        raise RuntimeError(dup)
     if review.status(pid) != "ready":
         raise RuntimeError("审片未放行（approve）——发布永远人工触发")
     rj = load_json(store.project_dir(pid) / "output" / "render.json") or {}
@@ -69,6 +100,7 @@ def publish(pid: str) -> dict:
         bvid = m.group(1)
     result = {"published_at": store.now(), "bvid": bvid,
               "url": f"https://www.bilibili.com/video/{bvid}" if bvid else "",
+              "video": _video_fingerprint(rj["final"]),
               "biliup_output": (out or "")[-400:]}
     save_json(result, store.project_dir(pid) / "output" / "publish_result.json")
     review._set(pid, "published", result["url"] or "投稿成功")
