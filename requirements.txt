@@ -1,0 +1,10 @@
+# bili-news-video 依赖（Python 3.12+ / 本机 3.14 实测）
+requests==2.34.2
+python-dotenv==1.2.4
+PyYAML==6.0.3
+imageio-ffmpeg==0.6.0     # ffmpeg 兜底（PATH 没有 ffmpeg 时用）
+Pillow==12.2.0            # 文字卡/棋盘卡绘制
+edge-tts>=7.0.0           # 默认配音后端（免费，需联网）
+
+# 开发/测试
+pytest==9.1.1
