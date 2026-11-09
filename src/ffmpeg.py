@@ -73,7 +73,10 @@ def parse_video_spec(stderr: str) -> dict:
 
 
 def probe_video(path) -> dict:
-    """成片规格：duration/width/height/fps。"""
+    """成片规格：duration/width/height/fps。三路降级：
+    ffprobe 成功 → ffmpeg -i stderr 解析 → 报错。
+    宽高解析不出来（0x0）不算探测成功——宁可在这里炸，也不把 0x0
+    当有效规格写进 render.json / qc_report.json。"""
     p = Path(path)
     pp = ffprobe_exe()
     info = {"duration": 0.0, "width": 0, "height": 0, "fps": 0.0}
@@ -81,30 +84,37 @@ def probe_video(path) -> dict:
         r = run([pp, "-v", "error", "-select_streams", "v:0",
                  "-show_entries", "stream=width,height,r_frame_rate:format=duration",
                  "-of", "default=noprint_wrappers=1", p])
-        for line in (r.stdout or "").splitlines():
-            k, _, v = line.partition("=")
-            if k == "width":
-                info["width"] = int(v or 0)
-            elif k == "height":
-                info["height"] = int(v or 0)
-            elif k == "duration":
-                try:
-                    info["duration"] = float(v)
-                except ValueError:
-                    pass
-            elif k == "r_frame_rate" and "/" in v:
-                n, d = v.split("/")
-                try:
-                    info["fps"] = round(float(n) / float(d), 2)
-                except (ValueError, ZeroDivisionError):
-                    pass
-        return info
-    # 无 ffprobe：一次 `ffmpeg -i`，时长与分辨率/帧率都从 stderr 降级解析
+        if r.returncode == 0 and "width=" in (r.stdout or ""):
+            for line in (r.stdout or "").splitlines():
+                k, _, v = line.partition("=")
+                if k == "width":
+                    info["width"] = int(v or 0)
+                elif k == "height":
+                    info["height"] = int(v or 0)
+                elif k == "duration":
+                    try:
+                        info["duration"] = float(v)
+                    except ValueError:
+                        pass
+                elif k == "r_frame_rate" and "/" in v:
+                    n, d = v.split("/")
+                    try:
+                        info["fps"] = round(float(n) / float(d), 2)
+                    except (ValueError, ZeroDivisionError):
+                        pass
+            if info["width"] and info["height"]:
+                return info
+        # ffprobe 执行失败 / 输出为空 / 宽高为 0 → 不当成功，掉到 stderr 降级
+    # 无 ffprobe（或 ffprobe 不可用）：一次 `ffmpeg -i`，时长与规格都从 stderr 解析
     err = (run([ffmpeg_exe(), "-i", p]).stderr or "")
     info["duration"] = parse_duration(err)
     if info["duration"] is None:
         info["duration"] = probe_duration(p)
     info.update(parse_video_spec(err))
+    if not (info["width"] and info["height"]):
+        raise RuntimeError(
+            f"视频规格探测失败（无视频流或文件损坏，拒绝以 0x0 充数）: "
+            f"{p} :: {err[-200:]}")
     return info
 
 

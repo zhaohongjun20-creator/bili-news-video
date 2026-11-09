@@ -219,6 +219,83 @@ def test_parse_video_spec_garbage_and_edge():
     assert ffmpeg.parse_duration("nothing useful") is None
 
 
+# ---- 环境兼容：probe_video 三路降级（不允许 0x0 当探测成功） ------------
+_STDERR_OK = (
+    "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'final.mp4':\n"
+    "  Duration: 00:01:30.04, start: 0.000000, bitrate: 1512 kb/s\n"
+    "    Stream #0:0(und): Video: h264 (High) (avc1 / 0x31637661), "
+    "yuv420p(tv, bt709), 1920x1080 [SAR 1:1 DAR 16:9], 1349 kb/s, "
+    "30 fps, 30 tbr, 30k tbn (default)\n"
+    "    Stream #0:1(und): Audio: aac (LC), 44100 Hz, stereo, fltp, "
+    "128 kb/s (default)\n")
+_FFPROBE_OK = "width=1920\nheight=1080\nr_frame_rate=30/1\nduration=10.0\n"
+
+
+class _FakeRet:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def test_probe_video_ffprobe_ok(monkeypatch):
+    import pytest
+    from src import ffmpeg
+    monkeypatch.setattr(ffmpeg, "ffprobe_exe", lambda: "ffprobe")
+    monkeypatch.setattr(ffmpeg, "run",
+                        lambda cmd, **kw: _FakeRet(stdout=_FFPROBE_OK))
+    info = ffmpeg.probe_video("x.mp4")
+    assert (info["width"], info["height"], info["fps"]) == (1920, 1080, 30.0)
+    assert info["duration"] == pytest.approx(10.0)
+
+
+def test_probe_video_no_ffprobe_falls_back_to_stderr(monkeypatch):
+    import pytest
+    from src import ffmpeg
+    monkeypatch.setattr(ffmpeg, "ffprobe_exe", lambda: None)
+    monkeypatch.setattr(ffmpeg, "run", lambda cmd, **kw: _FakeRet(stderr=_STDERR_OK))
+    info = ffmpeg.probe_video("x.mp4")
+    assert info["width"] == 1920 and info["height"] == 1080
+    assert info["fps"] == pytest.approx(30.0)
+    assert info["duration"] == pytest.approx(90.04)
+
+
+def test_probe_video_ffprobe_fails_falls_back(monkeypatch):
+    """ffprobe 存在但执行失败/输出为空 → 掉到 ffmpeg -i stderr 降级，不用 0x0。"""
+    from src import ffmpeg
+    monkeypatch.setattr(ffmpeg, "ffprobe_exe", lambda: "ffprobe")
+
+    def fake_run(cmd, **kw):
+        if "ffprobe" in str(cmd[0]):
+            return _FakeRet(returncode=1, stdout="", stderr="moov atom not found")
+        return _FakeRet(stderr=_STDERR_OK)
+
+    monkeypatch.setattr(ffmpeg, "run", fake_run)
+    info = ffmpeg.probe_video("x.mp4")
+    assert info["width"] == 1920 and info["height"] == 1080
+
+
+def test_probe_video_zero_size_never_success(monkeypatch):
+    """宽高为 0 绝不允许当探测成功返回：降级也解析不出 → 报错。"""
+    import pytest
+    from src import ffmpeg
+    monkeypatch.setattr(ffmpeg, "ffprobe_exe", lambda: "ffprobe")
+    # ffprobe 输出空；ffmpeg -i 只有 Duration、没有视频流行
+    monkeypatch.setattr(
+        ffmpeg, "run",
+        lambda cmd, **kw: _FakeRet(stderr="  Duration: 00:00:10.00, start: 0.000000\n"))
+    with pytest.raises(RuntimeError, match="0x0"):
+        ffmpeg.probe_video("broken.mp4")
+
+
+def test_probe_video_corrupt_raises(monkeypatch):
+    """损坏文件（两路都解析不出）→ 明确报错而不是静默返回全 0。"""
+    import pytest
+    from src import ffmpeg
+    monkeypatch.setattr(ffmpeg, "ffprobe_exe", lambda: None)
+    monkeypatch.setattr(ffmpeg, "run", lambda cmd, **kw: _FakeRet(stderr="Invalid data"))
+    with pytest.raises(RuntimeError):
+        ffmpeg.probe_video("corrupt.mp4")
+
+
 # ---- 地图卡：外围行为者按口播提及门控 -----------------------------------
 def test_external_actors_gate():
     from src import cards
