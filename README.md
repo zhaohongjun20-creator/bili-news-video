@@ -23,7 +23,9 @@ briefing.md ──ingest──▶ briefing.json ──scriptgen──▶ script.
 - **hammer**：红线检查（继承图文线实测边界 + grokbot 讨论定稿）。BLOCK 命中
   GLM 稿定向重写一次、模板稿剔条目；条目清零即拒稿——无事不硬凑。
 - **voice**：cosy(可选) → edge-tts → zhipu → 报错停线，绝不放机械音。
-- **cards**：新闻卡面（台标条/信源徽标/棋盘示意卡，"示意图非地理图"常驻）。
+- **cards**：新闻卡面（台标条/信源徽标/**Natural Earth 真实底图卡**：焦点国
+  红色高亮、标题地名自动定位（含首都别名），右栏外围行为者指向焦点；
+  底图数据缺失时降级棋盘示意卡）。
 - **render**：Ken Burns 缓推 + 顺序硬切 + ASS 字幕烧录 + loudnorm。
 - **qc**：规格/时长/响度/字幕自检，不过关不出审片。
 

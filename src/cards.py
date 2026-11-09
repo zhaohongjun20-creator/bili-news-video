@@ -13,6 +13,8 @@
 「示意图，非地理图」小字常驻棋盘卡右下角——军事地理内容的自保习惯。
 """
 import datetime as _dt
+import json
+import math
 import re
 from pathlib import Path
 
@@ -22,6 +24,9 @@ from src import scriptgen, store
 from src.config import load_config
 from src.jsonio import save_json
 
+ROOT = Path(__file__).resolve().parent.parent
+GEO_PATH = ROOT / "assets" / "geo" / "balkans_base.json"
+
 W, H = 1920, 1080
 BG = (13, 27, 42)          # 深蓝夜色
 BG2 = (19, 38, 58)         # 面板蓝
@@ -30,6 +35,30 @@ INK = (240, 244, 248)      # 主文字
 DIM = (148, 163, 184)      # 次文字
 GOLD = (233, 196, 106)     # 对华关联点缀金
 GRAY = (100, 116, 139)
+
+SEA = (10, 20, 33)         # 海
+LAND = (36, 52, 71)        # 陆地
+BORDER = (74, 96, 118)     # 国界
+LAND_DIM = (27, 41, 56)    # 非焦点陆地（更暗）
+
+# 地图视口（固定取景，观众每期看到同样的版面）——比例对齐左侧画布 870x660
+VIEW = (13.0, 39.0, 30.0, 48.2)
+MAP_BOX = (170, 290, 1040, 950)
+
+# 核心六国（要标中文名、可被红色高亮）——与 config show.region_nodes 同区
+CORE_ISO = {"SRB": "塞尔维亚", "KOS": "科索沃", "BIH": "波黑",
+            "MNE": "黑山", "MKD": "北马其顿", "ALB": "阿尔巴尼亚"}
+
+# 标题/文案里的地名 → 国家（含首都与惯用简称）
+ALIAS = {"塞尔维亚": "SRB", "科索沃": "KOS", "波黑": "BIH", "波斯尼亚": "BIH",
+         "黑山": "MNE", "北马其顿": "MKD", "马其顿": "MKD", "阿尔巴尼亚": "ALB",
+         "贝尔格莱德": "SRB", "普里什蒂纳": "KOS", "萨拉热窝": "BIH",
+         "波德戈里察": "MNE", "地拉那": "ALB", "斯科普里": "MKD",
+         "匈塞": "SRB"}
+
+# 外围行为者：右栏固定标签位（x, y）
+EXTERNAL = [("西方/欧盟", (1120, 380)), ("俄罗斯", (1120, 530)),
+            ("土耳其", (1120, 680))]
 
 BADGE_COLORS = {"官方": (31, 122, 90), "主流媒体": (42, 90, 168),
                 "区域专家": (180, 105, 32), "单方声称待核实": GRAY}
@@ -140,8 +169,121 @@ def _draw_quote(img, d, seg, meta) -> None:
     d.text((260, y + 60), tag, font=_font(44, True), fill=GRAY)
 
 
+_GEO_CACHE: list | None = None
+
+
+def _load_geo() -> list:
+    global _GEO_CACHE
+    if _GEO_CACHE is None:
+        if not GEO_PATH.exists():
+            _GEO_CACHE = []
+        else:
+            _GEO_CACHE = json.loads(GEO_PATH.read_text(encoding="utf-8"))["features"]
+    return _GEO_CACHE
+
+
+def _merc_y(lat: float) -> float:
+    return math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+
+
+def _proj(pt: tuple[float, float], box: tuple[int, int, int, int]) -> tuple[int, int]:
+    """lon/lat → 像素（Mercator，固定视口 VIEW）。"""
+    lon0, lat0, lon1, lat1 = VIEW
+    x0, y0, x1, y1 = box
+    px = (pt[0] - lon0) / (lon1 - lon0) * (x1 - x0) + x0
+    y1m, y0m = _merc_y(lat1), _merc_y(lat0)
+    py = (y1m - _merc_y(pt[1])) / (y1m - y0m) * (y1 - y0) + y0
+    return int(px), int(py)
+
+
+def _match_focus(headline: str) -> list[str]:
+    """从标题里匹配核心国家 ISO 码（含首都/简称），按出现顺序。"""
+    out = []
+    for name, iso in ALIAS.items():
+        if name in headline and iso not in out:
+            out.append(iso)
+    return out
+
+
+def _centroid(feat) -> tuple[float, float] | None:
+    """最大环的点平均（标签定位用，巴尔干六国紧凑形状够用）。"""
+    best, best_n = None, 0
+    for p in feat["geometry"]["coordinates"]:
+        if len(p[0]) > best_n:
+            best, best_n = p[0], len(p[0])
+    if not best:
+        return None
+    return (sum(x for x, _ in best) / best_n, sum(y for _, y in best) / best_n)
+
+
 def _draw_map(img, d, seg, meta) -> None:
-    """棋盘示意卡：config 固定节点布局 + 边。节点=圆角块，边=细线。"""
+    """真实底图卡：Natural Earth 50m 国界，焦点国家红色高亮，外围行为者
+    右栏标签+细线指向焦点。数据缺失时退回棋盘格示意卡（老版）。"""
+    feats = _load_geo()
+    card = seg.get("card", {})
+    headline = card.get("headline") or "巴尔干动向"
+
+    # 标题条（地图上方，独立区域不与图打架）
+    fh = _fit(d, headline, 52, W - 420, bold=True)
+    d.text((200, 215), headline, font=fh, fill=INK)
+
+    if not feats:
+        _draw_map_chessboard(img, d, seg, meta)
+        return
+
+    focus = _match_focus(headline) or [""]
+    x0, y0, x1, y1 = MAP_BOX
+    mw, mh = x1 - x0, y1 - y0
+
+    # 地图画布独立绘制（PIL 自动裁掉越界多边形），再整体贴回卡面
+    canvas = Image.new("RGB", (mw, mh), SEA)
+    cd = ImageDraw.Draw(canvas)
+    for feat in feats:
+        iso = feat["properties"].get("ADM0_A3", "")
+        is_focus = iso in focus
+        fill = ACCENT if is_focus else (LAND if iso in CORE_ISO else LAND_DIM)
+        for poly in feat["geometry"]["coordinates"]:
+            for ring in poly:
+                pts = [_proj(pt, (0, 0, mw, mh)) for pt in ring]
+                cd.polygon(pts, fill=fill,
+                           outline=(255, 122, 140) if is_focus else BORDER)
+    for feat in feats:                       # 标签画在地图画布上（跟随裁剪）
+        iso = feat["properties"].get("ADM0_A3", "")
+        if iso not in CORE_ISO:
+            continue
+        c = _centroid(feat)
+        if not c or not (VIEW[0] <= c[0] <= VIEW[2] and VIEW[1] <= c[1] <= VIEW[3]):
+            continue
+        name = CORE_ISO[iso]
+        px, py = _proj(c, (0, 0, mw, mh))
+        fl = _font(36, True) if iso in focus else _font(30)
+        tw = cd.textlength(name, font=fl)
+        cd.text((px - tw / 2, py - fl.size * 0.7), name, font=fl,
+                fill=INK if iso in focus else (176, 190, 205))
+    img.paste(canvas, (x0, y0))
+    d.rectangle([x0, y0, x1, y1], outline=BORDER, width=2)
+
+    # 外围行为者：右栏标签 + 细线指向首个焦点国
+    target = None
+    for feat in feats:
+        if feat["properties"].get("ADM0_A3") == focus[0]:
+            c = _centroid(feat)
+            target = _proj(c, MAP_BOX) if c else None
+    fc = _font(34, True)
+    for label, (lx, ly) in EXTERNAL:
+        tw = d.textlength(label, font=fc)
+        d.rounded_rectangle([lx - 14, ly - 10, lx + tw + 14, ly + 50], 10,
+                            fill=BG2, outline=BORDER, width=2)
+        d.text((lx, ly + 2), label, font=fc, fill=DIM)
+        if target:                            # 从标签左侧进入地图
+            d.line([lx - 14, ly + 20, target[0], target[1]],
+                   fill=(88, 110, 134), width=2)
+
+    d.text((1075, 905), "底图 Natural Earth（公有领域）", font=_font(26), fill=GRAY)
+
+
+def _draw_map_chessboard(img, d, seg, meta) -> None:
+    """降级版棋盘示意卡（底图数据缺失时才用）。"""
     cfg = load_config()
     nodes = {n["label"]: (int(n["x"] * (W - 480)) + 240, int(n["y"] * (H - 420)) + 300)
              for n in cfg["show"].get("region_nodes", [])}
@@ -153,7 +295,7 @@ def _draw_map(img, d, seg, meta) -> None:
         fw = _font(38, True)
         tw = d.textlength(label, font=fw)
         pad = 20
-        is_focus = focus and focus[:4] and (focus[:4] in label or label in focus)
+        is_focus = focus and (focus[:4] in label or label in focus)
         color = ACCENT if is_focus else BG2
         outline = ACCENT if is_focus else (51, 65, 85)
         d.rounded_rectangle([x - tw / 2 - pad, y - 30, x + tw / 2 + pad, y + 30],
