@@ -121,3 +121,50 @@ def test_narration_lines():
                                       "第三句更长一些，中间还有逗号，继续说。")
     assert all(len(l) <= 16 for l in lines)
     assert "".join(lines).startswith("第一句")
+
+
+# ---- 发布安全：redo 作废旧审片 ----------------------------------------
+def _fake_project(tmp_path, monkeypatch, status="ready"):
+    """造一个隔离的 ep-999 项目（不碰真实 projects/）。"""
+    from src import store
+    from src.jsonio import save_json
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    pdir = tmp_path / "projects" / "ep-999"
+    for sub in ("audio", "cards", "output"):
+        (pdir / sub).mkdir(parents=True)
+    save_json({"pid": "ep-999", "date": "2026-11-09",
+               "stages": {s: "done" for s in store.STAGES}},
+              pdir / "manifest.json")
+    save_json({"status": status, "note": "", "history": []},
+              pdir / "review.json")
+
+
+def test_redo_render_resets_review(tmp_path, monkeypatch):
+    from src import review, store
+    _fake_project(tmp_path, monkeypatch, status="ready")
+    store.redo_stage("ep-999", "render")
+    assert review.status("ep-999") == "draft"
+    # 下游阶段确实失效
+    m = store.manifest("ep-999")
+    assert "render" not in m["stages"] and "qc" not in m["stages"]
+    assert m["stages"]["voice"] == "done"          # 上游保留
+
+
+def test_redo_voice_also_resets_review(tmp_path, monkeypatch):
+    """redo voice 也会连带重做 render/qc——审片同样必须作废。"""
+    from src import review, store
+    _fake_project(tmp_path, monkeypatch, status="ready")
+    store.redo_stage("ep-999", "voice")
+    assert review.status("ep-999") == "draft"
+
+
+def test_redo_keeps_history(tmp_path, monkeypatch):
+    from src import review, store
+    from src.jsonio import load_json
+    _fake_project(tmp_path, monkeypatch, status="ready")
+    review.approve("ep-999", "看过，放行")           # history 现有 1 条
+    store.redo_stage("ep-999", "qc")
+    r = load_json(tmp_path / "projects" / "ep-999" / "review.json")
+    assert r["status"] == "draft"
+    assert len(r["history"]) == 2                  # 作废动作留痕，可审计
+

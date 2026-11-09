@@ -84,7 +84,11 @@ def mark_stage(pid: str, stage: str, detail: str = "") -> None:
 
 
 def redo_stage(pid: str, stage: str) -> None:
-    """使指定阶段及其后全部失效（下游都基于上游产物，必须重跑）。"""
+    """使指定阶段及其后全部失效（下游都基于上游产物，必须重跑）。
+
+    任何 redo 都意味着成片/质检将重做——旧审片结论（ready/published）
+    不再对新产物成立，一律回 draft，人工须重新看片放行。
+    """
     if stage not in STAGES:
         raise StoreError(f"未知阶段: {stage}")
     m = manifest(pid)
@@ -93,3 +97,6 @@ def redo_stage(pid: str, stage: str) -> None:
         m["stages"].pop(s, None)
     m["updated_at"] = now()
     save_json(m, project_dir(pid) / "manifest.json")
+    from src import review as review_mod      # 函数内导入避免与 review 循环依赖
+    if review_mod.status(pid) != "draft":
+        review_mod.reset(pid, f"redo {stage}: 产物将重做，旧审片结论作废")

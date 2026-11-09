@@ -41,7 +41,7 @@ def prepare(pid: str) -> Path:
         "",
         "简介:",
         f"「{cfg['show']['name']}」{date} 期。本期覆盖：",
-        *{f"· {t}" for t in item_titles},
+        *[f"· {t}" for t in item_titles],
         "",
         f"信源分级：{'、'.join(tiers) or '见片中标注'}；"
         "所有表述以信源原文为准，无法交叉验证的内容已在片中标注「待核实」。",
