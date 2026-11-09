@@ -56,9 +56,19 @@ ALIAS = {"塞尔维亚": "SRB", "科索沃": "KOS", "波黑": "BIH", "波斯尼�
          "波德戈里察": "MNE", "地拉那": "ALB", "斯科普里": "MKD",
          "匈塞": "SRB"}
 
-# 外围行为者：右栏固定标签位（x, y）
+# 外围行为者：右栏固定标签位（x, y）+ 触发关键词——仅当该段 narration 提及
+# 才画 chip 和连线，否则不画（避免把没出场的博弈方画进画面造成误导）
 EXTERNAL = [("西方/欧盟", (1120, 380)), ("俄罗斯", (1120, 530)),
             ("土耳其", (1120, 680))]
+EXTERNAL_TRIGGERS = {"西方/欧盟": ("欧盟", "西方", "北约"),
+                     "俄罗斯": ("俄",),
+                     "土耳其": ("土耳其",)}
+
+
+def external_actors(narration: str) -> list[str]:
+    """纯函数：本段口播提及的外围行为者标签（按 EXTERNAL 固定顺序）。"""
+    return [label for label, _ in EXTERNAL
+            if any(k in narration for k in EXTERNAL_TRIGGERS[label])]
 
 BADGE_COLORS = {"官方": (31, 122, 90), "主流媒体": (42, 90, 168),
                 "区域专家": (180, 105, 32), "单方声称待核实": GRAY}
@@ -263,14 +273,17 @@ def _draw_map(img, d, seg, meta) -> None:
     img.paste(canvas, (x0, y0))
     d.rectangle([x0, y0, x1, y1], outline=BORDER, width=2)
 
-    # 外围行为者：右栏标签 + 细线指向首个焦点国
+    # 外围行为者：右栏标签 + 细线指向首个焦点国——只画本段口播提及的
     target = None
     for feat in feats:
         if feat["properties"].get("ADM0_A3") == focus[0]:
             c = _centroid(feat)
             target = _proj(c, MAP_BOX) if c else None
     fc = _font(34, True)
+    mentioned = external_actors(seg.get("narration", ""))
     for label, (lx, ly) in EXTERNAL:
+        if label not in mentioned:
+            continue                        # 口播未提及：不画 chip、不画连线
         tw = d.textlength(label, font=fc)
         d.rounded_rectangle([lx - 14, ly - 10, lx + tw + 14, ly + 50], 10,
                             fill=BG2, outline=BORDER, width=2)
@@ -283,10 +296,13 @@ def _draw_map(img, d, seg, meta) -> None:
 
 
 def _draw_map_chessboard(img, d, seg, meta) -> None:
-    """降级版棋盘示意卡（底图数据缺失时才用）。"""
+    """降级版棋盘示意卡（底图数据缺失时才用）。外围行为者与主路同规则：
+    仅当该段 narration 提及才画节点/连线。"""
     cfg = load_config()
+    mentioned = set(external_actors(seg.get("narration", "")))
     nodes = {n["label"]: (int(n["x"] * (W - 480)) + 240, int(n["y"] * (H - 420)) + 300)
-             for n in cfg["show"].get("region_nodes", [])}
+             for n in cfg["show"].get("region_nodes", [])
+             if n["label"] not in EXTERNAL_TRIGGERS or n["label"] in mentioned}
     for a, b in cfg["show"].get("region_edges", []):
         if a in nodes and b in nodes:
             d.line([nodes[a], nodes[b]], fill=(51, 65, 85), width=3)

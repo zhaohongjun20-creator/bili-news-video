@@ -212,6 +212,53 @@ def test_parse_video_spec_garbage_and_edge():
     assert ffmpeg.parse_duration("nothing useful") is None
 
 
+# ---- 地图卡：外围行为者按口播提及门控 -----------------------------------
+def test_external_actors_gate():
+    from src import cards
+    assert cards.external_actors("欧盟宣布新一轮对塞援助计划。") == ["西方/欧盟"]
+    assert cards.external_actors("北约秘书长称将继续关注局势。") == ["西方/欧盟"]
+    assert cards.external_actors("俄罗斯外交部回应称毫无根据。") == ["俄罗斯"]
+    assert cards.external_actors("土耳其外长访问贝尔格莱德。") == ["土耳其"]
+    # 多方同时提及：按 EXTERNAL 固定顺序返回
+    assert cards.external_actors("西方与俄罗斯在安理会交锋，土耳其居中斡旋。") == \
+        ["西方/欧盟", "俄罗斯", "土耳其"]
+    # 完全未提及 → 不画 chip、不画连线
+    assert cards.external_actors("塞科对话本轮无实质进展。") == []
+
+
+# ---- QC：音轨检查与字幕时间越界（纯函数部分） ---------------------------
+def test_stderr_has_audio():
+    from src import ffmpeg
+    assert ffmpeg.stderr_has_audio(
+        "Stream #0:1(und): Audio: aac (LC), 44100 Hz, stereo, fltp, 128 kb/s")
+    assert not ffmpeg.stderr_has_audio(
+        "Stream #0:0(und): Video: h264 (High), yuv420p, 1920x1080, 30 fps")
+
+
+def test_ass_dialogue_span():
+    from src import qc
+    ass = ("[Script Info]\n"
+           "[Events]\n"
+           "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+           "Dialogue: 0,0:00:00.50,0:00:03.20,News,,0,0,0,,第一行\n"
+           "Dialogue: 0,0:00:03.80,0:00:07.00,News,,0,0,0,,第二行\n"
+           "Dialogue: 0,0:00:06.90,0:00:08.35,News,,0,0,0,,第三行\n")
+    first, last = qc.ass_dialogue_span(ass)
+    assert first == 0.5 and last == 8.35
+    assert qc.ass_dialogue_span("[Script Info]\n没有 Dialogue 行") is None
+
+
+# ---- ingest：tier 归一化的「非」前缀 -------------------------------------
+def test_normalize_tiers_negation_prefix():
+    from src import ingest
+    b = ingest._normalize_tiers({"items": [{"sources": [
+        {"tier": "非官方声明"}, {"tier": "官方声明"},
+        {"tier": "非官方渠道消息"}, {"tier": "需交叉验证"}]}]})
+    tiers = [s["tier"] for s in b["items"][0]["sources"]]
+    # 「非官方声明」若不先处理「非」前缀，会被「声明」子串误归「官方」
+    assert tiers == ["单方声称待核实", "官方", "单方声称待核实", "单方声称待核实"]
+
+
 # ---- 发布安全：redo 作废旧审片 ----------------------------------------
 def _fake_project(tmp_path, monkeypatch, status="ready"):
     """造一个隔离的 ep-999 项目（不碰真实 projects/）。"""

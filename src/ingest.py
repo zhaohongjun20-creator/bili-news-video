@@ -79,17 +79,22 @@ def _rule_parse(md: str) -> dict:
 
 def _normalize_tiers(briefing: dict) -> dict:
     """简报方 tier 写法各异（官方声明/OSINT分析/需交叉验证…），归一到四级：
-    官方 | 主流媒体 | 区域专家 | 单方声称待核实。匹配不到的从严归「待核实」。"""
+    官方 | 主流媒体 | 区域专家 | 单方声称待核实。匹配不到的从严归「待核实」。
+    「非」前缀（「非官方声明」等）先于关键词匹配处理——否则「声明」子串
+    会把「非官方声明」误归「官方」。"""
     rules = (("单方声称待核实", ("需交叉验证", "未经证实", "传言", "待核实", "线索", "建议补核")),
              ("区域专家", ("区域专家", "专家", "OSINT", "智库", "分析")),
              ("主流媒体", ("主流媒体", "媒体", "通讯社", "报纸", "电视")),
              ("官方", ("官方", "政府", "欧委会", "声明", "公告")))
     for it in briefing.get("items", []):
         for s in it.get("sources", []):
-            raw = str(s.get("tier", ""))
+            raw_l = str(s.get("tier", "")).strip().lower()
+            if raw_l.startswith("非"):      # 否定前缀：不是官方，从严
+                s["tier"] = "单方声称待核实"
+                continue
             tier = ""
             for canonical, keys in rules:
-                if any(k.lower() in raw.lower() for k in keys):
+                if any(k.lower() in raw_l for k in keys):
                     tier = canonical
                     break
             s["tier"] = tier or "单方声称待核实"      # 不认识的从严处理

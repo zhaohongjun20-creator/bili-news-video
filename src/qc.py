@@ -1,10 +1,30 @@
 # -*- coding: utf-8 -*-
-"""质检：规格、时长、响度、字幕文件存在性 → output/qc_report.json。"""
+"""质检：规格、时长、响度、音轨、字幕时间、字幕文件存在性 → output/qc_report.json。"""
+import re
 from pathlib import Path
 
 from src import ffmpeg, store
 from src.config import load_config
 from src.jsonio import save_json
+
+_DIALOGUE = re.compile(r"^Dialogue:\s*[^,]*,([^,]+),([^,]+)")
+
+
+def ass_dialogue_span(ass_text: str) -> tuple[float, float] | None:
+    """纯函数：ASS 字幕全部 Dialogue 的 (首条开始, 末条结束) 秒数。
+    无 Dialogue 行返回 None。时间格式 0:00:03.20（ centisecond，逗号变体兼容）。"""
+    def _t(s: str) -> float:
+        h, m, sec = s.strip().split(":")
+        return int(h) * 3600 + int(m) * 60 + float(sec.replace(",", "."))
+
+    starts, ends = [], []
+    for ln in ass_text.splitlines():
+        if m := _DIALOGUE.match(ln.strip()):
+            starts.append(_t(m.group(1)))
+            ends.append(_t(m.group(2)))
+    if not starts:
+        return None
+    return min(starts), max(ends)
 
 
 def qc(pid: str) -> dict:
@@ -32,6 +52,8 @@ def qc(pid: str) -> dict:
         problems.append(f"平均响度过低 {mv:.1f}dB（疑似静音轨）")
     if mv > cfg["qc"]["max_volume_db"]:
         problems.append(f"削波风险 {mv:.1f}dB")
+    if not ffmpeg.has_audio_stream(final):
+        problems.append("无音轨：成片缺音频流（配音混流失败？）")
 
     # 语速启发式：音频时长 vs 文案字数（约4.5字/秒 ±45%容差）。
     # 抓「字幕是A内容、音频是B内容」的缓存错配——规格指标查不出这种错。
@@ -47,8 +69,16 @@ def qc(pid: str) -> dict:
             problems.append(f"段 {seg['id']} 音画疑似错配：音频 {d:.1f}s vs "
                             f"文案约 {est:.1f}s（字数 {len(seg['narration'])}）")
 
-    if not (store.project_dir(pid) / "output" / "subs.ass").exists():
+    subs = store.project_dir(pid) / "output" / "subs.ass"
+    if not subs.exists():
         problems.append("字幕文件缺失")
+    else:
+        # 字幕 Dialogue 首末时间不得超出成片时长（±1s 容差，与本文件
+        # 时长自洽性检查同一口径）——烧录越界会裁字/露黑屏
+        span = ass_dialogue_span(subs.read_text(encoding="utf-8"))
+        if span and (span[0] < 0 or span[1] > spec["duration"] + 1.0):
+            problems.append(f"字幕时间越界：Dialogue 首末 {span[0]:.2f}s–"
+                            f"{span[1]:.2f}s 超出成片 {spec['duration']:.1f}s")
     if not Path(rj["cover"]).exists():
         problems.append("封面缺失")
 

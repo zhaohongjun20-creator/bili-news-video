@@ -108,6 +108,25 @@ def probe_video(path) -> dict:
     return info
 
 
+_AUDIO_STREAM = re.compile(r"Stream #\d+:\d+.*: Audio:")
+
+
+def stderr_has_audio(stderr: str) -> bool:
+    """纯函数：`ffmpeg -i` 的 stderr 里是否存在音频流（无 ffprobe 降级用）。"""
+    return _AUDIO_STREAM.search(stderr) is not None
+
+
+def has_audio_stream(path) -> bool:
+    """媒体是否含音轨。ffprobe 查流；无 ffprobe 时从 ffmpeg -i stderr 找 Audio 流行。"""
+    p = Path(path)
+    pp = ffprobe_exe()
+    if pp:
+        r = run([pp, "-v", "error", "-select_streams", "a",
+                 "-show_entries", "stream=index", "-of", "csv=p=0", p])
+        return bool((r.stdout or "").strip())
+    return stderr_has_audio(run([ffmpeg_exe(), "-i", p]).stderr or "")
+
+
 def mean_volume_db(path) -> float:
     """响度粗测（ffmpeg volumedetect 均值）。探测失败返回 -99（会触发 QC 拦截）。"""
     r = run([ffmpeg_exe(), "-i", str(path), "-af", "volumedetect", "-f", "null", "-"])
