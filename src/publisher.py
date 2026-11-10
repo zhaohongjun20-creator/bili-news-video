@@ -34,9 +34,10 @@ def prepare(pid: str) -> Path:
     tiers = sorted({s.get("tier") for it in brief.get("items", [])
                     for s in it.get("sources", []) if s.get("tier")})
 
+    show_label = script.get("meta", {}).get("show_label") or cfg["show"]["name"]
     lines = [
         f"标题: {title}",
-        f"备选标题: {date} 巴尔干发生了什么｜本期{len(item_titles)}条",
+        f"备选标题: {date} {show_label}｜本期{len(item_titles)}条",
         "",
         f"分区: tid {cfg['publish'].get('tid', 228)}（知识·时事）",
         f"标签: {','.join(cfg['publish']['tags'])}",
@@ -44,7 +45,7 @@ def prepare(pid: str) -> Path:
         f"成片: {rj.get('final', '')}",
         "",
         "简介:",
-        f"「{cfg['show']['name']}」{date} 期。本期覆盖：",
+        f"「{show_label}」{date} 期。本期覆盖：",
         *[f"· {t}" for t in item_titles],
         "",
         f"信源分级：{'、'.join(tiers) or '见片中标注'}；"
