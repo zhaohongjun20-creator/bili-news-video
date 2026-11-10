@@ -725,3 +725,89 @@ def test_actor_russia_triggers_precise():
     assert cards.external_actors("俄军在边境地区展开演习。") == ["俄罗斯"]
     assert cards.external_actors("一份俄语资料显示了不同的数字。") == []
     assert cards.external_actors("今天没有任何外围动向。") == []
+
+
+# ---- 人工稿通道：markdown 解析 ------------------------------------------
+_MINI_SCRIPT = """# 测试稿｜2026-11-10
+
+**主标题**：测试标题在这里
+
+## 4. 逐字稿
+
+**【00:00–00:15｜开场钩子】**
+
+【画面提示】黑场起，大字幕：「测试」。
+这一段是画面提示的续行，不应进口播。
+
+11 月 9 日，测试开场白，只讲事实。
+
+**【00:15–00:40｜各方怎么说】**
+
+【画面提示】信息卡。
+
+美军官员向媒体确认防护加严了，信源写作保留原样。官方没有具名通稿说明原因，
+华尔街日报援引匿名信源，这不是国防部声明。
+
+**【00:40–01:00｜收尾】**
+
+不站队，不预测。下期再见。
+"""
+
+
+def test_manual_script_parse():
+    import tempfile
+    from pathlib import Path as _P
+    from src import manual
+    with tempfile.TemporaryDirectory() as td:
+        f = _P(td) / "s.md"
+        f.write_text(_MINI_SCRIPT, encoding="utf-8")
+        s = manual.parse_script(f)
+    assert s["meta"]["mode"] == "manual"
+    assert s["meta"]["date"] == "2026-11-10"
+    assert s["title"] == "测试标题在这里"
+    kinds = [x["kind"] for x in s["segments"]]
+    assert kinds == ["hook", "item", "outro"]
+    hook = s["segments"][0]["narration"]
+    assert "测试开场白" in hook and "画面提示" not in hook and "续行" not in hook
+    item = s["segments"][1]
+    assert item["card"]["headline"]          # 卡面标题非空
+    assert "匿名信源" in item["narration"]
+
+
+def test_manual_script_rejects_wrong_format():
+    import tempfile
+    from pathlib import Path as _P
+    from src import manual
+    with tempfile.TemporaryDirectory() as td:
+        f = _P(td) / "bad.md"
+        f.write_text("# 没有逐字稿块的文档\n正文而已\n", encoding="utf-8")
+        try:
+            manual.parse_script(f)
+            assert False, "应当报错"
+        except RuntimeError:
+            pass
+
+
+def test_manual_parse_stops_at_md_headers():
+    """解析器必须在 md 标题行/分隔线处终止块——后文的信源表不能吞进口播。"""
+    import tempfile
+    from pathlib import Path as _P
+    from src import manual
+    md = _MINI_SCRIPT.replace("不站队，不预测。下期再见。\n", """
+不站队，不预测。下期再见。
+
+---
+
+## 5. 关键信息与信源
+
+- 信源A：https://example.com
+- 信源B：https://example.org
+""")
+    with tempfile.TemporaryDirectory() as td:
+        f = _P(td) / "s.md"
+        f.write_text(md, encoding="utf-8")
+        s = manual.parse_script(f)
+    outro = s["segments"][-1]["narration"]
+    assert "下期再见" in outro
+    assert "信源A" not in outro and "example.com" not in outro
+    assert s["meta"]["expected_s"] == 60.0          # 末段时间轴 00:40–01:00

@@ -69,6 +69,14 @@ def qc(pid: str) -> dict:
             problems.append(f"段 {seg['id']} 音画疑似错配：音频 {d:.1f}s vs "
                             f"文案约 {est:.1f}s（字数 {len(seg['narration'])}）")
 
+    # 人工稿预期时长守卫：分镜时间轴（manual.expected_s）与成片实际时长差
+    # 超 90s → 大概率解析器吞了稿子后半部分（语速启发式抓不住这种自洽错误）
+    expected_s = (script.get("meta") or {}).get("expected_s") or 0
+    if expected_s:
+        if abs(spec["duration"] - float(expected_s)) > 90:
+            problems.append(f"成片 {spec['duration']:.0f}s 偏离分镜预期 "
+                            f"{float(expected_s):.0f}s（>90s）——疑似解析吞段")
+
     subs = store.project_dir(pid) / "output" / "subs.ass"
     if not subs.exists():
         problems.append("字幕文件缺失")

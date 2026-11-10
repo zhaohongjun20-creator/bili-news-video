@@ -135,7 +135,8 @@ def _draw_hook(img, d, seg, meta) -> None:
     d.rectangle([120, 300, 520, 316], fill=ACCENT)
     d.text((120, 340), f"{date.year}年{date.month}月{date.day}日",
            font=_font(64), fill=DIM)
-    d.text((120, 430), load_config()["show"]["name"], font=_font(110, True),
+    d.text((120, 430), meta.get("show_label") or load_config()["show"]["name"],
+           font=_font(110, True),
            fill=INK)
     n = meta.get("n_items", 0)
     sub = f"本期 {n} 条动态" if n else "本期动态"
@@ -356,7 +357,7 @@ def _draw_mainline(img, d, seg, meta) -> None:
 
 
 def _draw_outro(img, d, seg, meta) -> None:
-    name = load_config()["show"]["name"]
+    name = meta.get("show_label") or load_config()["show"]["name"]
     d.text((W // 2 - len(name) * 55, 380), name, font=_font(110, True), fill=INK)
     lines = ["只讲发生了什么、各方怎么说", "不站队 · 不评论 · 不预测",
              "下期见"]
@@ -385,7 +386,8 @@ def render_cards(pid: str) -> list[dict]:
         # 每张卡一层淡面板底（四周 80px 边框感），避免纯背景太空
         d.rounded_rectangle([80, 180, W - 80, H - 80], 24, fill=BG2)
         img.paste(Image.new("RGB", (W - 320, H - 420), BG), (160, 260))
-        _chrome(img, d, badge=seg.get("card", {}).get("badge", ""))
+        _chrome(img, d, badge=seg.get("card", {}).get("badge", ""),
+                label=script["meta"].get("show_label", ""))
         _DRAWERS.get(seg["card"].get("type", "headline"), _draw_headline)(
             img, d, seg, script["meta"])
         png = cards_dir / f"{seg['id']}.png"

@@ -27,6 +27,10 @@ def prepare(pid: str) -> Path:
     excluded = set(brief.get("excluded_refs", []))
     item_titles = [it.get("title", "") for i, it in enumerate(brief.get("items", []), 1)
                    if i not in excluded and it.get("title")]
+    if not item_titles:      # 人工稿通道：没有 briefing，用各段卡面标题
+        item_titles = [s["card"].get("headline", "")
+                       for s in script.get("segments", [])
+                       if s.get("kind") == "item" and s.get("card", {}).get("headline")]
     tiers = sorted({s.get("tier") for it in brief.get("items", [])
                     for s in it.get("sources", []) if s.get("tier")})
 

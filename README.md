@@ -34,6 +34,7 @@ briefing.md ──ingest──▶ briefing.json ──scriptgen──▶ script.
 ```bash
 python cli.py doctor                          # 体检
 python cli.py ingest briefings/grok-1109.md   # 粘贴 Grok 简报原文（建 ep-NNN）
+python cli.py ingest-script drafts/稿.md      # 人工稿通道：已成稿逐字稿直接进产线
 python cli.py make ep-001                     # 全链到 QC（断点续跑）
 python cli.py redo ep-001 voice               # 某阶段起重跑
 python cli.py show ep-001                     # 状态/锤稿问题/QC 一览
@@ -42,6 +43,11 @@ python cli.py publish-prepare ep-001          # 生成 upload_info.txt
 python cli.py publish ep-001                  # biliup 真实投稿（唯一出片动作）
 python cli.py login                           # B站扫码登录/续期（cookie 与 bili-autopost-sau 共用）
 ```
+
+人工稿通道（`ingest-script`）：吃 Grok 出稿模板式的 markdown（【时间｜段标题】+
+口播段），跳过 AI 写稿直接进锤稿→配音→卡面→渲染全链；硬红线照查（信源徽标
+检查豁免——人工稿信源在行文里），解析器在 md 标题/分隔线处截断，稿子后附的
+信源表/红线清单不会被吞进口播；QC 校验成片时长对齐分镜时间轴（±90s）。
 
 投稿走 `bili-autopost-sau/sau_bridge.py` 的 biliup（自制·AI辅助，分区 tid 228
 知识·时事，config.yaml 可改）。**演示数据做的片子永远不要 publish**——卡面

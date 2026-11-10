@@ -49,6 +49,13 @@ def cmd_ingest(a) -> None:
     print(f"下一步: python cli.py make {pid}")
 
 
+def cmd_ingest_script(a) -> None:
+    from src import manual
+    pid = manual.ingest_script(a.file, date=a.date or "", label=a.label or "")
+    print(f"{pid}: 人工稿解析完成")
+    print(f"下一步: python cli.py make {pid}")
+
+
 def cmd_make(a) -> None:
     try:
         out = pipeline.make(a.pid, offline=a.offline)
@@ -154,6 +161,11 @@ def main() -> None:
     p.add_argument("file")
     p.add_argument("--date", default="")
     p.set_defaults(func=cmd_ingest)
+    p = sub.add_parser("ingest-script")
+    p.add_argument("file", help="已成稿的口播逐字稿 markdown（Grok 出稿模板式）")
+    p.add_argument("--date", default="")
+    p.add_argument("--label", default="", help="卡面栏目名（默认「军事快讯」）")
+    p.set_defaults(func=cmd_ingest_script)
     p = sub.add_parser("make")
     p.add_argument("pid")
     p.add_argument("--offline", action="store_true", help="强制模板降级（无网联调）")

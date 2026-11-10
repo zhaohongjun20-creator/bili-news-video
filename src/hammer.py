@@ -25,9 +25,10 @@ _REPAIR_PROMPT = """下面是一份新闻快讯逐字稿（JSON）。其中部�
 只输出修改后的完整 JSON。"""
 
 
-def _check_segment(seg: dict, item_sources: dict) -> list[dict]:
+def _check_segment(seg: dict, item_sources: dict, manual: bool = False) -> list[dict]:
     issues = redlines.check_text(seg.get("narration", ""))
-    if seg.get("kind") == "item":
+    if seg.get("kind") == "item" and not manual:
+        # 信源徽标检查仅约束 AI 稿；人工稿的信源表述在行文里，只守硬红线
         ref = seg.get("item_ref", 0)
         tier = item_sources.get(ref, "")
         if tier != "单方声称待核实" and not redlines.check_badge(seg["narration"]):
@@ -59,11 +60,12 @@ def hammer(pid: str) -> dict:
 
     all_issues: list[dict] = []
     repaired = False
+    manual = script.get("meta", {}).get("mode") == "manual"
     for attempt in range(2):
         flagged: dict[str, list] = {}
         all_issues = []
         for seg in script["segments"]:
-            iss = _check_segment(seg, item_sources)
+            iss = _check_segment(seg, item_sources, manual=manual)
             if iss:
                 flagged[seg["id"]] = iss
                 all_issues.extend([dict(i, seg=seg["id"]) for i in iss])
