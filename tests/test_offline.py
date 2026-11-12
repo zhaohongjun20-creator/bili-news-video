@@ -811,3 +811,14 @@ def test_manual_parse_stops_at_md_headers():
     assert "下期再见" in outro
     assert "信源A" not in outro and "example.com" not in outro
     assert s["meta"]["expected_s"] == 60.0          # 末段时间轴 00:40–01:00
+
+
+def test_map_applicable_region_gate():
+    """地图卡地域门控：巴尔干条目适用底图，波罗的海/中亚/中东条目不适用。"""
+    from src import cards
+    assert cards.map_applicable("塞尔维亚「学生名单」大选定局")
+    assert cards.map_applicable("匈塞铁路铺轨进入新阶段")
+    assert cards.map_applicable("科索沃北部市镇改选")
+    assert not cards.map_applicable("乌斯季卢加港区起火")        # 波罗的海
+    assert not cards.map_applicable("集安组织暂停亚美尼亚表决权")  # 中亚
+    assert not cards.map_applicable("拉斐尔发布超级冰巡航导弹")    # 以色列

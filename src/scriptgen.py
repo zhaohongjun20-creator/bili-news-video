@@ -93,7 +93,7 @@ def valid_refs(brief: dict) -> set[int]:
 
 def _template_script(brief: dict, cfg: dict) -> dict:
     """无 GLM 降级：确定性拼稿。句子模板本身就按红线设计。"""
-    show = cfg["show"]["name"]
+    show = brief.get("show_label") or cfg["show"]["name"]
     d = _dt.date.fromisoformat(brief["date"])
     kept = [(i, it) for i, it in enumerate(brief["items"], 1)
             if i in valid_refs(brief)]              # item_ref 用原始 ref，不重排
@@ -182,7 +182,8 @@ def build_script(pid: str) -> dict:
     key = api_keys()["zhipu"]
     if key and refs:
         obj, _ = chat_json_ex(
-            key, _PROMPT.format(show=cfg["show"]["name"], target_s=target_s,
+            key, _PROMPT.format(show=brief.get("show_label") or cfg["show"]["name"],
+                                target_s=target_s,
                                 brief=_brief_digest(brief)),
             model=cfg["glm"]["model"], temperature=cfg["glm"]["temperature"],
             max_tokens=cfg["glm"]["max_tokens"], timeout=cfg["glm"]["timeout_s"],
@@ -196,6 +197,7 @@ def build_script(pid: str) -> dict:
 
     script["meta"] = {"pid": pid, "date": brief["date"],
                       "show": cfg["show"]["name"],
+                      "show_label": brief.get("show_label") or cfg["show"]["name"],
                       "target_s": target_s, "mode": mode,
                       "n_items": sum(1 for s in script["segments"]
                                      if s["kind"] == "item"),

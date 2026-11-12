@@ -101,7 +101,7 @@ def _normalize_tiers(briefing: dict) -> dict:
     return briefing
 
 
-def ingest(briefing_md_path, pid_hint_date: str = "") -> tuple[str, dict]:
+def ingest(briefing_md_path, pid_hint_date: str = "", label: str = "") -> tuple[str, dict]:
     """读取简报原文 → 建项目 → 写 briefing.json。返回 (pid, briefing)。"""
     md_path = __import__("pathlib").Path(briefing_md_path)
     raw = md_path.read_text(encoding="utf-8")
@@ -126,6 +126,8 @@ def ingest(briefing_md_path, pid_hint_date: str = "") -> tuple[str, dict]:
         briefing = _rule_parse(raw)
         mode = "rule_fallback"
     briefing = _normalize_tiers(briefing)
+    if label:
+        briefing["show_label"] = label      # 栏目名覆盖（卡面/简介跟随，不写死巴尔干）
 
     if pid_hint_date:
         briefing["date"] = pid_hint_date

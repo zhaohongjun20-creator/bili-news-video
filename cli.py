@@ -40,12 +40,14 @@ def cmd_sample(_a) -> None:
 
 
 def cmd_ingest(a) -> None:
-    pid, brief = ingest.ingest(a.file, a.date or "")
+    pid, brief = ingest.ingest(a.file, a.date or "", a.label or "")
     mode = brief.get("ingest_mode")
     if brief.get("nothing_to_report"):
         print(f"{pid}: 简报为「今日无事」，本期可停（无事不硬凑）。mode={mode}")
         return
     print(f"{pid}: 简报解析完成（{mode}，{len(brief['items'])} 条）")
+    if brief.get("show_label"):
+        print(f"栏目名: {brief['show_label']}")
     print(f"下一步: python cli.py make {pid}")
 
 
@@ -160,6 +162,7 @@ def main() -> None:
     p = sub.add_parser("ingest")
     p.add_argument("file")
     p.add_argument("--date", default="")
+    p.add_argument("--label", default="", help="栏目名覆盖（默认取 config show.name）")
     p.set_defaults(func=cmd_ingest)
     p = sub.add_parser("ingest-script")
     p.add_argument("file", help="已成稿的口播逐字稿 markdown（Grok 出稿模板式）")

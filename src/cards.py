@@ -229,12 +229,24 @@ def _centroid(feat) -> tuple[float, float] | None:
     return (sum(x for x, _ in best) / best_n, sum(y for _, y in best) / best_n)
 
 
+def map_applicable(headline: str) -> bool:
+    """纯函数：本条新闻是否适用巴尔干底图——至少命中一个核心国（含首都别名）。
+    波罗的海/中亚/中东等条目命中不了，退回大字卡，不给错误地域暗示。"""
+    return bool(_match_focus(headline))
+
+
 def _draw_map(img, d, seg, meta) -> None:
     """真实底图卡：Natural Earth 50m 国界，焦点国家红色高亮，外围行为者
     右栏标签+细线指向焦点。数据缺失时退回棋盘格示意卡（老版）。"""
     feats = _load_geo()
     card = seg.get("card", {})
     headline = card.get("headline") or "巴尔干动向"
+
+    if not map_applicable(headline):
+        # 本条与本图无关（如波罗的海/中亚条目）：整卡退回大字标题卡，
+        # 不画一张没有焦点还带行为者连线的巴尔干图误导观众
+        _draw_headline(img, d, seg, meta)
+        return
 
     # 标题条（地图上方，独立区域不与图打架）
     fh = _fit(d, headline, 52, W - 420, bold=True)
@@ -244,7 +256,7 @@ def _draw_map(img, d, seg, meta) -> None:
         _draw_map_chessboard(img, d, seg, meta)
         return
 
-    focus = _match_focus(headline) or [""]
+    focus = _match_focus(headline)
     x0, y0, x1, y1 = MAP_BOX
     mw, mh = x1 - x0, y1 - y0
 
