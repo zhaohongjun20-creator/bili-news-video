@@ -11,6 +11,12 @@ from src.config import load_config
 from src.jsonio import load_json, save_json
 
 
+def publish_tags(show_label: str, cfg: dict) -> list:
+    """地域专属标签只在对应栏目期使用（环球期不挂「巴尔干」）。"""
+    return [t for t in cfg["publish"]["tags"]
+            if not (t == "巴尔干" and show_label != "巴尔干快讯")]
+
+
 def prepare(pid: str) -> Path:
     """生成 upload_info.txt。draft 阶段即可预览物料；真正投稿闸门在 publish（须 ready）。"""
     cfg = load_config()
@@ -35,12 +41,13 @@ def prepare(pid: str) -> Path:
                     for s in it.get("sources", []) if s.get("tier")})
 
     show_label = script.get("meta", {}).get("show_label") or cfg["show"]["name"]
+    tags = publish_tags(show_label, cfg)
     lines = [
         f"标题: {title}",
         f"备选标题: {date} {show_label}｜本期{len(item_titles)}条",
         "",
         f"分区: tid {cfg['publish'].get('tid', 228)}（知识·时事）",
-        f"标签: {','.join(cfg['publish']['tags'])}",
+        f"标签: {','.join(tags)}",
         f"封面: {rj.get('cover', '')}",
         f"成片: {rj.get('final', '')}",
         "",

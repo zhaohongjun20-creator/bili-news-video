@@ -13,7 +13,7 @@ _SAU = Path(__file__).resolve().parent.parent.parent / "bili-autopost-sau"
 sys.path.insert(0, str(_SAU))
 import sau_bridge  # noqa: E402
 
-from src import review, store  # noqa: E402
+from src import publisher, review, store  # noqa: E402
 from src.config import load_config  # noqa: E402
 from src.jsonio import load_json, save_json  # noqa: E402
 
@@ -92,7 +92,8 @@ def publish(pid: str) -> dict:
 
     out = sau_bridge.upload(
         video_path=rj["final"], title=title, desc=_desc_from_upload_info(pid),
-        tags=list(pconf["tags"]), tid=int(pconf.get("tid", 228)),
+        tags=publisher.publish_tags(script.get("meta", {}).get("show_label", ""), cfg),
+        tid=int(pconf.get("tid", 228)),
         cover=rj.get("cover"), copyright_self=True)
     bvid = ""
     m = re.search(r"(BV[0-9A-Za-z]{10})", out or "")
