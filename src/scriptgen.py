@@ -236,14 +236,18 @@ def load_script(pid: str) -> dict:
 
 # 锤稿通过后供渲染使用的小工具
 def narration_lines(narration: str, width: int = 16) -> list[str]:
-    """口播按 ≤width 字切字幕行（标点优先断行）。"""
+    """口播按 ≤width 字切字幕行。
+
+    标点优先断行；剩下 1 字就回并上一行，避免「件。」「击。」单独成行。
+    空句（只有标点）丢弃。
+    """
     import re as _re
     parts = [p for p in _re.split(r"(?<=[。！？；：,.])\s*", narration) if p]
     lines: list[str] = []
     for p in parts:
         while len(p) > width:
             cut = width
-            for j in range(min(width, len(p) - 1), int(width * 0.6), -1):
+            for j in range(min(width, len(p) - 1), max(1, int(width * 0.6)), -1):
                 if p[j - 1] in "，。！？；：、,":
                     cut = j
                     break
@@ -251,4 +255,13 @@ def narration_lines(narration: str, width: int = 16) -> list[str]:
             p = p[cut:]
         if p.strip():
             lines.append(p.strip())
+    # 只剩标点、或去掉标点后只剩 1 个字的行，并回上一行
+    merged: list[str] = []
+    for ln in lines:
+        core = _re.sub(r"[。！？；：，、,.]+", "", ln).strip()
+        if merged and len(core) <= 1:
+            merged[-1] = (merged[-1] + ln).strip()
+        elif core:
+            merged.append(ln)
+    lines = merged
     return lines or [narration]
