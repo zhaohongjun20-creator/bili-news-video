@@ -914,3 +914,14 @@ def test_globe_projection_math():
     assert abs(x - 500) < 1e-6 and abs(y - 400) < 1e-6
     _, _, c = cards._globe_project((180, 0), 0, 0, 100, 500, 500)
     assert c < 0
+
+
+def test_subtitle_events_weighted_by_chars():
+    from src.renderer import subtitle_events
+    narr = {"seg01": "短句。这一行有十二个字以上所以更长一些。"}
+    tl = [{"id": "seg01", "start": 0.0, "audio_in": 0.3, "audio_duration": 6.0}]
+    ev = subtitle_events(narr, tl)
+    assert len(ev) == 2
+    assert abs(ev[0][0] - 0.3) < 1e-6
+    assert abs(ev[-1][1] - 6.3) < 1e-6
+    assert (ev[1][1] - ev[1][0]) > (ev[0][1] - ev[0][0])   # 长行多占时

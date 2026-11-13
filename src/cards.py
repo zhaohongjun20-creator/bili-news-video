@@ -132,15 +132,22 @@ def _chrome(img: Image.Image, d: ImageDraw.ImageDraw, badge: str = "",
 
 def _draw_hook(img, d, seg, meta) -> None:
     date = _dt.date.fromisoformat(meta["date"])
-    d.rectangle([120, 300, 520, 316], fill=ACCENT)
-    d.text((120, 340), f"{date.year}年{date.month}月{date.day}日",
-           font=_font(64), fill=DIM)
-    d.text((120, 430), meta.get("show_label") or load_config()["show"]["name"],
-           font=_font(110, True),
-           fill=INK)
+    d.rectangle([120, 260, 520, 276], fill=ACCENT)
+    d.text((120, 296), f"{date.year}年{date.month}月{date.day}日",
+           font=_font(56), fill=DIM)
+    d.text((120, 380), meta.get("show_label") or load_config()["show"]["name"],
+           font=_font(92, True), fill=INK)
+    # 当日钩子句：第一条动态的标题放大上画（没有就跳过）
+    y = 540
+    hook_line = meta.get("hook_line") or ""
+    if hook_line:
+        fh = _font(48, True)
+        for ln in _wrap(hook_line, fh, d, W - 800, max_lines=2):
+            d.text((120, y), ln, font=fh, fill=GOLD)
+            y += 74
     n = meta.get("n_items", 0)
-    sub = f"本期 {n} 条动态" if n else "本期动态"
-    d.text((120, 600), sub, font=_font(56), fill=DIM)
+    sub = f"本期 {n} 条动态 · 只讲事实和各方说法" if n else "本期动态"
+    d.text((120, max(y + 40, 730)), sub, font=_font(40), fill=DIM)
     # 开场地球仪：转到当期主地点（无地点则不画，保持原版式）
     place = meta.get("hook_place")
     if place and _load_world():
@@ -623,6 +630,7 @@ def _draw_map_dynamic(img, d, seg, meta, place: dict) -> None:
         d.text((1120, fy), "· " + ln, font=fline, fill=(196, 181, 253))
         fy += 66
     d.text((1075, 905), "底图 Natural Earth（公有领域）", font=_font(26), fill=GRAY)
+    return ((x0 + px) / W, (y0 + py) / H)     # 焦点比例：渲染时 zoompan 推向此点
 
 
 _DRAWERS = {"hook": _draw_hook, "headline": _draw_headline, "quote": _draw_quote,
@@ -640,7 +648,9 @@ def render_cards(pid: str) -> list[dict]:
     if first_item:
         hook_place = resolve_place(first_item.get("card", {}).get("headline", ""),
                                    first_item.get("narration", ""))
-    meta = dict(script["meta"], hook_place=hook_place)
+    meta = dict(script["meta"], hook_place=hook_place,
+                hook_line=(first_item.get("card", {}).get("headline", "")
+                           if first_item else ""))
     out = []
     for seg in script["segments"]:
         img = Image.new("RGB", (W, H), BG)
@@ -650,10 +660,47 @@ def render_cards(pid: str) -> list[dict]:
         img.paste(Image.new("RGB", (W - 320, H - 420), BG), (160, 260))
         _chrome(img, d, badge=seg.get("card", {}).get("badge", ""),
                 label=script["meta"].get("show_label", ""))
-        _DRAWERS.get(seg["card"].get("type", "headline"), _draw_headline)(
+        ret = _DRAWERS.get(seg["card"].get("type", "headline"), _draw_headline)(
             img, d, seg, meta)
         png = cards_dir / f"{seg['id']}.png"
         img.save(png)
-        out.append({"id": seg["id"], "png": str(png)})
+        entry = {"id": seg["id"], "png": str(png)}
+        if isinstance(ret, tuple) and len(ret) == 2:
+            entry["focus"] = ret              # 动态地图焦点比例 → 渲染推向该点
+        out.append(entry)
     save_json({"cards": out}, store.project_dir(pid) / "cards.json")
+    return out
+
+
+def make_cover(pid: str) -> Path:
+    """独立 16:9 封面：主标题大字 + 钩子副题 + 地球仪，不是片头卡缩放。"""
+    script = scriptgen.load_script(pid)
+    meta = script["meta"]
+    out = store.project_dir(pid) / "output" / "cover.jpg"
+    img = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, W, 16], fill=ACCENT)
+    label = meta.get("show_label") or load_config()["show"]["name"]
+    d.text((140, 120), f"{label} · {meta['date']}", font=_font(44, True), fill=ACCENT)
+    title = script.get("title", "")
+    f = _fit(d, title, 84, 1060, bold=True)
+    y = 230
+    for ln in _wrap(title, f, d, 1060, max_lines=3):
+        d.text((140, y), ln, font=f, fill=INK)
+        y += int(f.size * 1.28)
+    first_item = next((s for s in script["segments"] if s.get("kind") == "item"), None)
+    if first_item:
+        hl = first_item.get("card", {}).get("headline", "")
+        if hl and hl not in title:
+            fh2 = _fit(d, hl, 44, 1000)
+            d.text((140, y + 26), "· " + hl, font=fh2, fill=GOLD)
+    d.text((140, 910), "只讲发生了什么 · 各方怎么说　|　不站队 · 不评论 · 不预测",
+           font=_font(34), fill=DIM)
+    place = resolve_place(first_item.get("card", {}).get("headline", "")
+                          if first_item else "",
+                          first_item.get("narration", "") if first_item else "")
+    if place and _load_world():
+        _draw_globe(d, place, R=320, cx=1480, cy=610,
+                    focus_iso=place.get("iso") or "")
+    img.resize((1280, 720)).save(out, quality=90)
     return out
