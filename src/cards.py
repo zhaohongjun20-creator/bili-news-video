@@ -294,21 +294,34 @@ def _load_world() -> list:
     return _WORLD_CACHE
 
 
-def resolve_place(headline: str = "", narration: str = "") -> dict | None:
-    """标题优先（同长取 city>country>sea），标题无命中再扫口播。"""
-    for text in (headline or "", narration or ""):
+def resolve_place_all(headline: str = "", narration: str = "") -> list[dict]:
+    """全部命中候选：标题命中优先，其次长名、city>country>sea。"""
+    out: dict[str, dict] = {}
+    for via, text in (("标题", headline or ""), ("口播", narration or "")):
         if not text:
             continue
-        best = None
         for name, val in GAZETTEER.items():
             if name in text:
-                key = (-len(name), _KIND_RANK.get(val[3], 3))
-                if best is None or key < best[0]:
-                    best = (key, {"name": name, "lon": val[0], "lat": val[1],
-                                  "radius": val[2], "kind": val[3], "iso": val[4]})
-        if best:
-            return best[1]
-    return None
+                cand = {"name": name, "lon": val[0], "lat": val[1],
+                        "radius": val[2], "kind": val[3], "iso": val[4], "via": via}
+                cur = out.get(name)
+                if cur is None or (cur["via"] == "口播" and via == "标题"):
+                    out[name] = cand
+    return sorted(out.values(),
+                  key=lambda c: (0 if c["via"] == "标题" else 1,
+                                 _KIND_RANK.get(c["kind"], 3), -len(c["name"])))
+
+
+def resolve_place(headline: str = "", narration: str = "") -> dict | None:
+    """最优定位 + 置信度：与最优解相距 >15° 的其他命中记入 alternatives
+    （同名异地/一事多地的信号，卡面会标「人工确认」）。"""
+    cands = resolve_place_all(headline, narration)
+    if not cands:
+        return None
+    best = cands[0]
+    alts = [c["name"] for c in cands[1:]
+            if abs(c["lon"] - best["lon"]) > 15 or abs(c["lat"] - best["lat"]) > 15]
+    return {**best, "alternatives": alts}
 
 
 def _merc_bbox_viewport(lon: float, lat: float, radius: float,
@@ -630,6 +643,11 @@ def _draw_map_dynamic(img, d, seg, meta, place: dict) -> None:
         d.text((1120, fy), "· " + ln, font=fline, fill=(196, 181, 253))
         fy += 66
     d.text((1075, 905), "底图 Natural Earth（公有领域）", font=_font(26), fill=GRAY)
+    # 定位依据 + 置信度提示（地图画错比没有地图更糟）
+    tag = f"定位：{place['name']}（{place.get('via', '标题')}）"
+    if place.get("alternatives"):
+        tag += " · 另命中 " + "、".join(place["alternatives"][:2]) + "，人工确认"
+    d.text((x0 + 14, y0 + 12), tag, font=_font(26), fill=DIM)
     return ((x0 + px) / W, (y0 + py) / H)     # 焦点比例：渲染时 zoompan 推向此点
 
 
