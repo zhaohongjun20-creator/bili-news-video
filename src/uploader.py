@@ -11,7 +11,10 @@ from pathlib import Path
 
 _SAU = Path(__file__).resolve().parent.parent.parent / "bili-autopost-sau"
 sys.path.insert(0, str(_SAU))
-import sau_bridge  # noqa: E402
+try:
+    import sau_bridge  # noqa: E402
+except ImportError:            # CI/独立检出：桥接层不在，投稿功能停用，单测可跑
+    sau_bridge = None
 
 from src import publisher, review, store  # noqa: E402
 from src.config import load_config  # noqa: E402
@@ -20,11 +23,15 @@ from src.jsonio import load_json, save_json  # noqa: E402
 
 def check_account() -> bool:
     """登录态检查（biliup renew）。失效则 cli login 扫码。"""
+    if sau_bridge is None:
+        return False
     return sau_bridge.check_account()
 
 
 def login() -> None:
     """终端二维码扫码登录/续期。"""
+    if sau_bridge is None:
+        raise RuntimeError("bili-autopost-sau 桥接层不在本仓库旁（独立检出），无法登录")
     sau_bridge.login_interactive()
 
 
@@ -40,11 +47,31 @@ def _desc_from_upload_info(pid: str) -> str:
 
 
 def _video_fingerprint(path) -> dict:
-    """成片指纹（sha256 前 16 位 + size）：重复投稿判定的持久化依据。"""
+    """成片指纹（sha256 前 16 位 + size）：分块读取，不把整片视频读进内存。"""
     import hashlib
     p = Path(path)
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
     return {"path": str(p), "size": p.stat().st_size,
-            "sha256_16": hashlib.sha256(p.read_bytes()).hexdigest()[:16]}
+            "sha256_16": h.hexdigest()[:16]}
+
+
+def _intent_path(pid: str) -> Path:
+    return store.project_dir(pid) / "output" / "publishing.json"
+
+
+def _check_publishing_intent(pid: str, fingerprint: dict) -> None:
+    """投稿中断守卫：上传开始前写 publishing.json；若同指纹 intent 存在且无
+    成功记录，上次上传结果未知（B站可能已收到）→ 人工确认后才允许重试。"""
+    intent = load_json(_intent_path(pid))
+    if not intent or intent.get("video") != fingerprint:
+        return                                  # 无 intent / 新成片 → 覆盖即可
+    raise RuntimeError(
+        "检测到未完结的投稿（publishing.json，" + intent.get("started_at", "")
+        + "）：上次上传是否成功未知。请到创作中心确认；若未发出，删除该文件后重试；"
+        "若已发出，切勿重投。")
 
 
 def _already_published(pid: str) -> str:
@@ -85,24 +112,35 @@ def publish(pid: str) -> dict:
     missing = [s for s in store.STAGES if m["stages"].get(s) != "done"]
     if missing:
         raise RuntimeError(f"阶段未完成，拒绝投稿：{missing}（先跑 make）")
+    if sau_bridge is None:
+        raise RuntimeError("bili-autopost-sau 桥接层缺失，无法投稿")
+    fingerprint = _video_fingerprint(rj["final"])
+    _check_publishing_intent(pid, fingerprint)
+    save_json({"video": fingerprint, "started_at": store.now()},
+              _intent_path(pid))
     cfg = load_config()
     pconf = cfg["publish"]
     script = load_json(store.project_dir(pid) / "script.json") or {}
     title = script.get("title") or f"{cfg['show']['name']} {script.get('meta', {}).get('date', '')}"
 
-    out = sau_bridge.upload(
-        video_path=rj["final"], title=title, desc=_desc_from_upload_info(pid),
-        tags=publisher.publish_tags(script.get("meta", {}).get("show_label", ""), cfg),
-        tid=int(pconf.get("tid", 228)),
-        cover=rj.get("cover"), copyright_self=True)
+    try:
+        out = sau_bridge.upload(
+            video_path=rj["final"], title=title, desc=_desc_from_upload_info(pid),
+            tags=publisher.publish_tags(script.get("meta", {}).get("show_label", ""), cfg),
+            tid=int(pconf.get("tid", 228)),
+            cover=rj.get("cover"), copyright_self=True)
+    except Exception:
+        # intent 保留：上传结果未知 → 待人工确认（防 B站已收、本地无记录后重投）
+        raise
     bvid = ""
     m = re.search(r"(BV[0-9A-Za-z]{10})", out or "")
     if m:
         bvid = m.group(1)
     result = {"published_at": store.now(), "bvid": bvid,
               "url": f"https://www.bilibili.com/video/{bvid}" if bvid else "",
-              "video": _video_fingerprint(rj["final"]),
+              "video": fingerprint,
               "biliup_output": (out or "")[-400:]}
     save_json(result, store.project_dir(pid) / "output" / "publish_result.json")
+    _intent_path(pid).unlink(missing_ok=True)
     review._set(pid, "published", result["url"] or "投稿成功")
     return result
