@@ -73,6 +73,10 @@ def _kind(title: str) -> str:
         return "hook"
     if "收尾" in title:
         return "outro"
+    if any(k in title for k in ("对华", "中方", "涉华", "中国")):
+        return "china"                        # 涉华段走 RL-CHINA 锚点检查
+    if "主线" in title:
+        return "mainline"
     return "item"
 
 
@@ -115,12 +119,21 @@ def parse_script(md_path: Path, date: str = "", label: str = "") -> dict:
 
 
 def ingest_script(md_path, date: str = "", label: str = "") -> str:
-    """建项目、写 script.json、标记 ingest+script 完成。返回 pid。"""
+    """建项目、写 script.json、抓信源链接、标记 ingest+script 完成。返回 pid。"""
     md_path = Path(md_path)
+    md = md_path.read_text(encoding="utf-8")
     script = parse_script(md_path, date=date, label=label)
     pid, pdir = store.new_project(md_path, script["meta"]["date"])
     save_json(script, pdir / "script.json")
-    store.mark_stage(pid, "ingest", "manual script")
+    # 人工稿信源链接单独归档（不改稿原文，只留档）
+    urls = dict.fromkeys(re.findall(r"https?://[^\s）)】。，；、]+", md))
+    save_json({"built_at": store.now(), "note": "人工稿信源链接（自动抓取）",
+               "sources": [{"ref": 0, "item": script["title"], "tier": "",
+                            "name": "见稿内信源表", "url": u, "claim": "",
+                            "verification": "待核实", "event_time": ""}
+                           for u in urls]},
+              pdir / "sources.json")
+    store.mark_stage(pid, "ingest", f"manual script / 信源链接 {len(urls)} 条")
     store.mark_stage(pid, "script",
                      f"manual / {len(script['segments'])} 段 / 人工逐字稿")
     return pid
