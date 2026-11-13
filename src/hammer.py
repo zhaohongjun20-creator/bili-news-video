@@ -122,6 +122,10 @@ def hammer(pid: str) -> dict:
             all_issues.append({"rule": "RL-COUNT", "level": "info",
                                "hit": note, "seg": hook.get("id", "seg01")})
 
+    # 事实一致性核验：数字/日期必须见于简报，待核实信源必须带对冲
+    from src import factcheck
+    all_issues.extend(factcheck.check_script(brief, script))
+
     n_items_left = sum(1 for s in script["segments"] if s.get("kind") == "item")
     status = "ok"
     if n_items_left == 0:
