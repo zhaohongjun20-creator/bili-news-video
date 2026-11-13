@@ -27,6 +27,22 @@ def ass_dialogue_span(ass_text: str) -> tuple[float, float] | None:
     return min(starts), max(ends)
 
 
+def check_spec(spec: dict, vcfg: dict) -> list[str]:
+    """纯函数：成片规格 vs 配置（宽、高、帧率全查，不只查高度）。"""
+    problems: list[str] = []
+    if (spec.get("width") != vcfg.get("width")
+            or spec.get("height") != vcfg.get("height")):
+        problems.append(f"分辨率异常: {spec.get('width')}x{spec.get('height')}"
+                        f"（应为 {vcfg.get('width')}x{vcfg.get('height')}）")
+    try:
+        fps_delta = abs(float(spec.get("fps") or 0) - float(vcfg.get("fps") or 0))
+    except (TypeError, ValueError):
+        fps_delta = 99.0
+    if fps_delta > 0.5:
+        problems.append(f"帧率异常: {spec.get('fps')}（应为 {vcfg.get('fps')}）")
+    return problems
+
+
 def qc(pid: str) -> dict:
     from src.jsonio import load_json
     cfg = load_config()
@@ -37,8 +53,7 @@ def qc(pid: str) -> dict:
     problems: list[str] = []
 
     spec = ffmpeg.probe_video(final)
-    if spec["height"] != cfg["video"]["height"]:
-        problems.append(f"分辨率异常: {spec['width']}x{spec['height']}")
+    problems += check_spec(spec, cfg["video"])
     if abs(spec["duration"] - rj["duration"]) > 1.0:
         problems.append(f"时长自洽性: probe {spec['duration']:.1f}s vs render "
                         f"{rj['duration']:.1f}s")
