@@ -925,3 +925,128 @@ def test_subtitle_events_weighted_by_chars():
     assert abs(ev[0][0] - 0.3) < 1e-6
     assert abs(ev[-1][1] - 6.3) < 1e-6
     assert (ev[1][1] - ev[1][0]) > (ev[0][1] - ev[0][0])   # 长行多占时
+
+
+# ---- 第四轮审查:P0 信源追溯/事实核验/QC规格 + P1 投稿intent/地图置信度 ----
+def test_check_spec_dimensions():
+    """QC 规格检查：宽、高、帧率全查，不只查高度。"""
+    from src.qc import check_spec
+    cfg = {"width": 1920, "height": 1080, "fps": 30}
+    assert check_spec({"width": 1280, "height": 1080, "fps": 30}, cfg)
+    assert not check_spec({"width": 1920, "height": 1080, "fps": 29.97}, cfg)
+    assert check_spec({"width": 1920, "height": 1080, "fps": 25}, cfg)
+
+
+def test_rule_parse_extracts_urls():
+    """规则降级也要抓信源链接（可追溯不依赖 GLM）。"""
+    from src.ingest import _rule_parse
+    md = """雷达 2026-11-13
+
+1. 测试条目【官方】
+   详见 https://example.com/a 和 https://example.com/b。
+"""
+    b = _rule_parse(md)
+    urls = [s.get("url") for it in b["items"] for s in it.get("sources", [])]
+    assert "https://example.com/a" in urls and "https://example.com/b" in urls
+
+
+def test_factcheck_rules():
+    from src import factcheck
+    brief = {"items": [
+        {"title": "乌斯季卢加港起火", "event_time": "11月11日凌晨",
+         "summary": "11月11日凌晨遇袭，约5座储罐受损。",
+         "sources": [{"tier": "单方声称待核实", "name": "SBU"}], "chess": ""},
+        {"title": "霍尔木兹油轮", "summary": "11月12日一艘油轮遭不明投射物。",
+         "sources": [{"tier": "官方", "name": "UKMTO"}], "chess": ""}]}
+    script = {"segments": [
+        {"id": "seg02", "kind": "item", "item_ref": 1,
+         "narration": "乌斯季卢加港11月11日凌晨遇袭，约5座储罐受损，"
+                      "另有999架无人机。信源级别【单方声称待核实】。"},
+        {"id": "seg03", "kind": "item", "item_ref": 2,
+         "narration": "11月12日油轮遭不明投射物。信源级别【官方】。"}]}
+    issues = factcheck.check_script(brief, script)
+    assert any(i["rule"] == "FC-HEDGE" and i["level"] == "block" for i in issues)
+    assert any(i["rule"] == "FC-NUM" and "999" in i["hit"] for i in issues)
+    assert not any(i["hit"] == "5" for i in issues)      # 简报内数字不告警
+    script["segments"][0]["narration"] = (
+        "乌斯季卢加港11月11日凌晨遇袭，据单方面说法约5座储罐受损，"
+        "尚待核实。信源级别【单方声称待核实】。")
+    issues2 = factcheck.check_script(brief, script)
+    assert not any(i["rule"] == "FC-HEDGE" for i in issues2)
+
+
+def test_resolve_place_ambiguity():
+    from src import cards
+    p = cards.resolve_place("乌斯季卢加与霍尔木兹同时出事", "")
+    assert p["name"] in ("乌斯季卢加", "霍尔木兹")
+    assert p["alternatives"]                              # 相距>15° → 人工确认
+    single = cards.resolve_place("霍尔木兹海峡油轮事件", "")
+    assert single and not single.get("alternatives")
+
+
+def test_manual_kinds_china_mainline():
+    import tempfile
+    from pathlib import Path as _P
+    from src import manual
+    md = """# 测试稿｜2026-11-13
+
+**主标题**：测试标题
+
+**【00:00–00:10｜开场】**
+
+开场白内容测试测试测试。
+
+**【00:10–00:20｜对华关联】**
+
+中国外交部此前表示相关立场。官方锚点句子在这里。
+
+**【00:20–00:30｜主线追踪】**
+
+塞科对话是长期主线之一，需要持续关注走向。
+
+**【00:30–00:40｜收尾】**
+
+不站队不预测，下期再见。
+"""
+    with tempfile.TemporaryDirectory() as td:
+        f = _P(td) / "s.md"
+        f.write_text(md, encoding="utf-8")
+        s = manual.parse_script(f)
+    kinds = [x["kind"] for x in s["segments"]]
+    assert kinds == ["hook", "china", "mainline", "outro"]
+
+
+def test_publish_intent_blocks_unknown_outcome(tmp_path, monkeypatch):
+    """上传中断 → publishing.json 拦住重投；人工确认删除后才能重试。"""
+    import pytest
+    import sys
+    from src import review, uploader
+    calls = _stub_sau(monkeypatch)
+    pdir = _fake_release(tmp_path, monkeypatch)
+    (pdir / "output" / "upload_info.txt").write_text(
+        "标题: t\n简介:\n简介内容够长\n", encoding="utf-8")
+    review.approve("ep-999", "放行")
+    stub = sys.modules["sau_bridge"]
+
+    def _boom(**kw):
+        calls["upload"] += 1
+        raise RuntimeError("biliup failed: cookie expired")
+
+    stub.upload = _boom
+    with pytest.raises(RuntimeError, match="biliup"):
+        uploader.publish("ep-999")
+    assert calls["upload"] == 1
+    assert (pdir / "output" / "publishing.json").exists()
+    with pytest.raises(RuntimeError, match="未完结的投稿"):
+        uploader.publish("ep-999")                        # 结果未知 → 拦
+    assert calls["upload"] == 1
+    (pdir / "output" / "publishing.json").unlink()        # 人工确认未发出
+
+    def _ok(**kw):
+        calls["upload"] += 1
+        return "BV1RETRY0000"
+
+    stub.upload = _ok
+    r = uploader.publish("ep-999")
+    assert r["bvid"] == "BV1RETRY0000" and calls["upload"] == 2
+    assert not (pdir / "output" / "publishing.json").exists()
