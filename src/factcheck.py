@@ -62,3 +62,102 @@ def check_script(brief: dict, script: dict) -> list[dict]:
                     issues.append({"rule": "FC-HEDGE", "level": "block", "seg": sid,
                                    "hit": "该条含待核实信源，口播缺少对冲表述"})
     return issues
+
+
+# ---- 声明保真与实体（确定性比对，不是 AI 自评） ---------------------------
+_ATTR_VERBS = ("称", "表示", "宣布", "指出", "声称", "强调", "援引", "透露", "报道")
+_CLAIM = re.compile(r"([\u4e00-\u9fa5A-Za-z0-9·]{2,14})"
+                    r"(称|表示|宣布|指出|声称|强调|透露)([^。；]{6,40})")
+_ENTITY_PAT = (re.compile(r"「([^」]{2,14})」"),
+               re.compile(r"\b([A-Z][A-Za-z]{2,}(?:\s[A-Z][A-Za-z]{2,})?)\b"),
+               re.compile(r"([\u4e00-\u9fa5]{2,8})"
+                          r"(?:州|海峡|共和国|组织|舰队|基地|炼厂|港口|机场|电视台)"))
+
+
+def _attributed_claims(brief: dict) -> list[dict]:
+    """简报里的有主声明：sources[].claim + 摘要中「X称Y」句。"""
+    claims: list[dict] = []
+    for i, it in enumerate(brief.get("items", []), 1):
+        for s in it.get("sources", []):
+            c = str(s.get("claim", "")).strip()
+            if len(c) >= 6:
+                claims.append({"ref": i, "actor": str(s.get("name", "")), "text": c})
+        for m in _CLAIM.finditer(_norm_dates(str(it.get("summary", "")))):
+            claims.append({"ref": i, "actor": m.group(1), "text": m.group(3)})
+    return claims
+
+
+def check_attribution(brief: dict, script: dict) -> list[dict]:
+    """声明保真：简报「X称Y」的 Y 出现在口播时，同句必须保留归属动词；
+    否则单方声明被写成既定事实 → BLOCK。逐句比对（剥离引号/逗号干扰）。"""
+    claims = _attributed_claims(brief)
+    if not claims:
+        return []
+    issues: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for seg in script.get("segments", []):
+        if seg.get("kind") not in ("item", "china", "mainline"):
+            continue
+        text = _norm_dates(seg.get("narration", ""))
+        for sent in re.split(r"(?<=[。！？])", text):
+            bare = re.sub(r"[，、「」（）()\s]", "", sent)
+            for c in claims:
+                frag = re.sub(r"[，、「」（）()\s]", "", c["text"])[:10]
+                if len(frag) < 6 or frag not in bare:
+                    continue
+                if any(v in sent for v in _ATTR_VERBS):
+                    continue
+                key = (seg.get("id", ""), frag)
+                if key in seen:
+                    continue
+                seen.add(key)
+                issues.append({"rule": "FC-ATTR", "level": "block",
+                               "seg": seg.get("id", ""),
+                               "hit": f"声明「{c['actor']}…{c['text'][:16]}」在口播中"
+                                      "失去归属动词——单方说法不得写成既定事实"})
+    return issues
+
+
+def _entities(blob: str) -> set[str]:
+    ents: set[str] = set()
+    for pat in _ENTITY_PAT:
+        ents |= set(pat.findall(blob))
+    return {e.strip() for e in ents if len(e.strip()) >= 2}
+
+
+def check_entities(brief: dict, script: dict) -> list[dict]:
+    """新实体检查：口播出现的专名（引号名/拉丁名/机构地名）必须见于简报 → WARN。"""
+    ents = _entities("".join(str(it.get(k, "")) for it in brief.get("items", [])
+                             for k in ("title", "summary", "chess")))
+    if not ents:
+        return []
+    issues: list[dict] = []
+    for seg in script.get("segments", []):
+        if seg.get("kind") not in ("item", "china", "mainline"):
+            continue
+        for e in sorted(_entities(seg.get("narration", "")) - ents):
+            issues.append({"rule": "FC-ENTITY", "level": "warn",
+                           "seg": seg.get("id", ""),
+                           "hit": f"专名「{e}」未见于简报（人工核对是否新增事实）"})
+    return issues
+
+
+# ---- 人工稿来源可追溯（不强制徽标，但必须有来源交代） ----------------------
+_MANUAL_SRC = ("据", "称", "报道", "宣布", "透露", "援引", "确认", "表示",
+               "官方", "媒体", "通讯社", "消息", "来源", "声明", "部")
+
+
+def check_manual_sources(script: dict) -> list[dict]:
+    """人工稿每条 item/china/mainline 段必须有来源交代；没有 → BLOCK。
+    人工稿不走 AI 稿徽标格式，但「不可追溯」同样不放行。"""
+    issues: list[dict] = []
+    for seg in script.get("segments", []):
+        if seg.get("kind") not in ("item", "china", "mainline"):
+            continue
+        text = seg.get("narration", "")
+        if not any(m in text for m in _MANUAL_SRC):
+            issues.append({"rule": "RL-SRC-M", "level": "block",
+                           "seg": seg.get("id", ""),
+                           "hit": "人工稿段落没有任何来源交代（据/称/报道/官方…），"
+                                  "无法追溯——补来源或删段"})
+    return issues

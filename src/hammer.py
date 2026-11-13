@@ -122,9 +122,15 @@ def hammer(pid: str) -> dict:
             all_issues.append({"rule": "RL-COUNT", "level": "info",
                                "hit": note, "seg": hook.get("id", "seg01")})
 
-    # 事实一致性核验：数字/日期必须见于简报，待核实信源必须带对冲
+    # 事实一致性核验（数字/日期须见于简报、待核实须对冲、声明保真、新实体）。
+    # 人工稿没有简报基线 → 跳过数字/日期比对，改走来源可追溯检查（RL-SRC-M）
     from src import factcheck
-    all_issues.extend(factcheck.check_script(brief, script))
+    if brief.get("items"):
+        all_issues.extend(factcheck.check_script(brief, script))
+        all_issues.extend(factcheck.check_attribution(brief, script))
+        all_issues.extend(factcheck.check_entities(brief, script))
+    if manual:
+        all_issues.extend(factcheck.check_manual_sources(script))
 
     n_items_left = sum(1 for s in script["segments"] if s.get("kind") == "item")
     status = "ok"
