@@ -85,3 +85,47 @@ def check_badge(text: str) -> bool:
 def check_china_anchor(text: str) -> bool:
     """涉华表述是否有官方口径锚点。"""
     return bool(_CHINA_ANCHOR.search(text))
+
+
+# ---- hook 条数口径（GLM 偶发把 6 条念成 5 条） --------------------------
+_CN_DIGIT = {"零": 0, "一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
+             "六": 6, "七": 7, "八": 8, "九": 9}
+_INT2CN = {1: "一", 2: "两", 3: "三", 4: "四", 5: "五",
+           6: "六", 7: "七", 8: "八", 9: "九"}
+
+
+def _cn2int(s: str) -> int | None:
+    if s.isdigit():
+        return int(s)
+    if s == "十":
+        return 10
+    if "十" in s:
+        a, _, b = s.partition("十")
+        if (a and a not in _CN_DIGIT) or (b and b not in _CN_DIGIT):
+            return None
+        return (int(_CN_DIGIT.get(a, 1))) * 10 + (int(_CN_DIGIT.get(b, 0)) if b else 0)
+    return _CN_DIGIT.get(s)
+
+
+def _int2cn(n: int) -> str:
+    if n < 10:
+        return _INT2CN.get(n, str(n))
+    if n == 10:
+        return "十"
+    if n < 20:
+        return "十" + _INT2CN.get(n - 10, "")
+    return str(n)
+
+
+def fix_hook_count(text: str, n_items: int) -> tuple[str, str | None]:
+    """hook 口播念的条数与实际条目数不符时做最小替换修正；没提条数则不动。
+    返回 (修正后文本, 说明)。"""
+    matches = list(re.finditer(r"([一二两三四五六七八九十\d]+)\s*条", text))
+    if not matches:
+        return text, None
+    claimed = _cn2int(matches[0].group(1))
+    if claimed is None or claimed == n_items:
+        return text, None
+    fixed = text[:matches[0].start()] + _int2cn(n_items) + "条" + text[matches[0].end():]
+    return fixed, (f"hook条数口径{claimed}≠实际{n_items}，"
+                   f"已修正为「{_int2cn(n_items)}条」")

@@ -112,6 +112,16 @@ def hammer(pid: str) -> dict:
                 all_issues.append(dict(i, seg=seg["id"]))
         break
 
+    # hook 条数口径：GLM 偶发把条数念错（如 6 条念成 5 条），最小替换修正
+    hook = next((s for s in script["segments"] if s.get("kind") == "hook"), None)
+    if hook:
+        n_all = sum(1 for s in script["segments"] if s.get("kind") == "item")
+        fixed, note = redlines.fix_hook_count(hook.get("narration", ""), n_all)
+        if note:
+            hook["narration"] = fixed
+            all_issues.append({"rule": "RL-COUNT", "level": "info",
+                               "hit": note, "seg": hook.get("id", "seg01")})
+
     n_items_left = sum(1 for s in script["segments"] if s.get("kind") == "item")
     status = "ok"
     if n_items_left == 0:
