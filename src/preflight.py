@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """环境体检：doctor 子命令。hard=必须修，soft=有降级路径可容忍。"""
 import shutil
+import sys
 
 from src import narrator
 from src.config import api_keys, load_config
@@ -10,6 +11,13 @@ from src.ffmpeg import ffmpeg_exe, ffprobe_exe
 def doctor(_cfg: dict | None = None) -> list[tuple[str, str, str]]:
     rows: list[tuple[str, str, str]] = []
     cfg = load_config()
+
+    exe = sys.executable.lower()
+    if "libreoffice" in exe:
+        rows.append(("hard", "python 解释器",
+                     f"漂移到 LibreOffice（{exe[:52]}）——请用 Python314"))
+    else:
+        rows.append(("ok", "python 解释器", exe[:60]))
 
     if shutil.which("ffmpeg"):
         rows.append(("ok", "ffmpeg", "PATH 可用"))

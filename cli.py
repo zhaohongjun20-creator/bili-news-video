@@ -24,6 +24,14 @@ def _die(msg: str) -> None:
     sys.exit(1)
 
 
+def ensure_interpreter() -> None:
+    """防解释器漂移：本机裸 `python` 会命中 LibreOffice 自带的解释器。"""
+    if "libreoffice" in sys.executable.lower():
+        _die("当前 Python 来自 LibreOffice（解释器漂移）。请改用:\n"
+             "  C:\\Users\\15804\\AppData\\Local\\Programs\\Python"
+             "\\Python314\\python.exe cli.py ...")
+
+
 def cmd_doctor(_a) -> None:
     bad = False
     for level, name, detail in preflight.doctor(load_config()):
@@ -155,6 +163,7 @@ def cmd_login(_a) -> None:
 
 
 def main() -> None:
+    ensure_interpreter()
     ap = argparse.ArgumentParser(description="时政快讯视频线")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
