@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from src import scriptgen, store
 from src.config import load_config
-from src.jsonio import save_json
+from src.jsonio import load_json, save_json
 
 ROOT = Path(__file__).resolve().parent.parent
 GEO_PATH = ROOT / "assets" / "geo" / "balkans_base.json"
@@ -687,7 +687,33 @@ def render_cards(pid: str) -> list[dict]:
             entry["focus"] = ret              # 动态地图焦点比例 → 渲染推向该点
         out.append(entry)
     save_json({"cards": out}, store.project_dir(pid) / "cards.json")
+    _update_map_confirm(pid, script)
     return out
+
+
+def _update_map_confirm(pid: str, script: dict) -> None:
+    """地图人工确认档案：多候选命中 → PENDING（发布闸门拦截，cli map-confirm
+    确认）；唯一命中 → AUTO；人工确认过且地点未变 → 保留 CONFIRMED。"""
+    mc_path = store.project_dir(pid) / "map_confirm.json"
+    mc = load_json(mc_path) or {}
+    for seg in script["segments"]:
+        if seg.get("card", {}).get("type") != "map":
+            continue
+        headline = seg["card"].get("headline", "")
+        if map_applicable(headline):
+            continue                            # 巴尔干固定框：无定位歧义
+        place = resolve_place(headline, seg.get("narration", ""))
+        if not place:
+            continue                            # 大字卡：无定位
+        prev = mc.get(seg["id"])
+        if (prev and prev.get("status") == "CONFIRMED"
+                and prev.get("place") == place["name"]):
+            continue
+        mc[seg["id"]] = {"place": place["name"], "via": place.get("via", "标题"),
+                         "alternatives": place.get("alternatives", []),
+                         "status": "PENDING" if place.get("alternatives") else "AUTO",
+                         "updated_at": store.now()}
+    save_json(mc, mc_path)
 
 
 def make_cover(pid: str) -> Path:

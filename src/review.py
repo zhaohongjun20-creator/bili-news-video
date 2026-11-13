@@ -43,6 +43,15 @@ def gate(pid: str) -> list[str]:
             problems.append("QC 报告早于当前成片（旧 QC 残留）——redo qc")
         elif abs(float(qc.get("duration", -1)) - float(rj.get("duration", -2))) > 1.0:
             problems.append("QC 报告与当前成片时长不一致（疑似旧 QC）——redo qc")
+
+    # 地图人工确认：多候选地点未确认 → 不进最终发布审批
+    mc = load_json(pdir / "map_confirm.json") or {}
+    for k in sorted(mc):
+        v = mc[k]
+        if v.get("status") == "PENDING":
+            problems.append(
+                f"地图定位待人工确认（{k}→{v.get('place')}，"
+                f"另命中 {v.get('alternatives')}）——python cli.py map-confirm {pid} {k}")
     return problems
 
 

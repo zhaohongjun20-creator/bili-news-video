@@ -129,6 +129,23 @@ def cmd_reject(a) -> None:
     print(f"{a.pid}: 已退稿。理由已记录")
 
 
+def cmd_map_confirm(a) -> None:
+    """人工确认地图定位（PENDING → CONFIRMED），解除发布闸门。"""
+    from src.jsonio import load_json
+    pdir = store.project_dir(a.pid)
+    mc = load_json(pdir / "map_confirm.json") or {}
+    if a.seg not in mc:
+        _die(f"{a.seg} 不在 map_confirm.json 中（现有: {sorted(mc) or '无'}）。"
+             "只有多候选命中的动态地图卡需要确认")
+    mc[a.seg]["status"] = "CONFIRMED"
+    if a.place:
+        mc[a.seg]["chosen"] = a.place
+    mc[a.seg]["confirmed_at"] = store.now()
+    save_json(mc, pdir / "map_confirm.json")
+    print(f"{a.pid}/{a.seg}: 地图定位已人工确认 → "
+          f"{mc[a.seg].get('chosen') or mc[a.seg]['place']}")
+
+
 def cmd_publish_prepare(a) -> None:
     st = review.status(a.pid)
     if st not in ("ready", "draft"):
@@ -201,6 +218,12 @@ def main() -> None:
     p.add_argument("pid")
     p.add_argument("--note", default="")
     p.set_defaults(func=cmd_reset)
+    p = sub.add_parser("map-confirm")
+    p.add_argument("pid")
+    p.add_argument("seg")
+    p.add_argument("place", nargs="?", default="",
+                   help="确认的地点名（默认取首选候选）")
+    p.set_defaults(func=cmd_map_confirm)
     p = sub.add_parser("publish-prepare")
     p.add_argument("pid")
     p.set_defaults(func=cmd_publish_prepare)
