@@ -1050,3 +1050,123 @@ def test_publish_intent_blocks_unknown_outcome(tmp_path, monkeypatch):
     r = uploader.publish("ep-999")
     assert r["bvid"] == "BV1RETRY0000" and calls["upload"] == 2
     assert not (pdir / "output" / "publishing.json").exists()
+
+
+# ---- 第五轮 P0:声明保真/人工稿来源/map-confirm/状态机/生产报告 -----------
+def test_factcheck_attribution_preserved():
+    from src import factcheck
+    brief = {"items": [{"title": "t", "summary": "雷扎伊表示，在美方回应前不会重开海峡。",
+                        "sources": [], "chess": ""}]}
+    # 逐字照抄声明内容但删掉归属动词 → BLOCK（确定性能力边界：改写归人工）
+    script = {"segments": [
+        {"id": "seg02", "kind": "item", "item_ref": 1,
+         "narration": "在美方回应前不会重开海峡。信源级别【官方】。"},
+        {"id": "seg03", "kind": "item", "item_ref": 1,
+         "narration": "雷扎伊表示，在美方回应前德黑兰不会重开海峡。信源级别【官方】。"}]}
+    issues = factcheck.check_attribution(brief, script)
+    assert any(i["rule"] == "FC-ATTR" and i["seg"] == "seg02" for i in issues)
+    assert not any(i["seg"] == "seg03" for i in issues)   # 保留归属动词 → 通过
+
+
+def test_hammer_manual_no_fact_baseline_flood(tmp_path, monkeypatch):
+    """人工稿无简报基线：数字/日期不得误报 FC-NUM/FC-DATE（实测 bug 回归）。"""
+    from src import store
+    from src.jsonio import save_json
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    pdir = tmp_path / "projects" / "ep-997"
+    pdir.mkdir(parents=True)
+    save_json({"pid": "ep-997", "stages": {}}, pdir / "manifest.json")
+    save_json({"title": "人工稿", "meta": {"mode": "manual", "date": "2026-11-13"},
+               "segments": [
+                   {"id": "seg01", "kind": "hook", "narration": "11月13日，军事快讯开场。",
+                    "card": {}, "item_ref": 0},
+                   {"id": "seg02", "kind": "item", "narration":
+                    "据美军官员向媒体确认，11月11日凌晨有250架无人机参与行动，约5000万人关注。",
+                    "card": {"headline": "x"}, "item_ref": 0}],
+               "warnings": []}, pdir / "script.json")
+    from src import hammer
+    report = hammer.hammer("ep-997")
+    fc = [i for i in report["issues"] if i["rule"].startswith("FC-N") or
+          i["rule"].startswith("FC-D")]
+    assert fc == []                                   # 无基线不误报
+    assert not any(i["rule"] == "RL-SRC-M" for i in report["issues"])  # 有来源交代
+
+
+def test_hammer_manual_blocks_unsourced(tmp_path, monkeypatch):
+    """人工稿段落完全没有来源交代 → RL-SRC-M BLOCK。"""
+    from src import store
+    from src.jsonio import save_json
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    pdir = tmp_path / "projects" / "ep-996"
+    pdir.mkdir(parents=True)
+    save_json({"pid": "ep-996", "stages": {}}, pdir / "manifest.json")
+    save_json({"title": "人工稿", "meta": {"mode": "manual", "date": "2026-11-13"},
+               "segments": [
+                   {"id": "seg01", "kind": "hook", "narration": "开场白内容足够长。",
+                    "card": {}, "item_ref": 0},
+                   {"id": "seg02", "kind": "item",
+                    "narration": "港口起了大火，事态非常严重，情况仍在继续发展变化。",
+                    "card": {"headline": "x"}, "item_ref": 0}],
+               "warnings": []}, pdir / "script.json")
+    from src import hammer
+    report = hammer.hammer("ep-996")
+    assert any(i["rule"] == "RL-SRC-M" and i["level"] == "block"
+               for i in report["issues"])
+
+
+def test_map_confirm_gate(tmp_path, monkeypatch):
+    """PENDING 地图 → gate 拦截；CONFIRMED 后放行。"""
+    from src import review
+    from src.jsonio import save_json
+    _fake_release(tmp_path, monkeypatch)
+    pdir = tmp_path / "projects" / "ep-999"
+    save_json({"seg02": {"place": "乌斯季卢加", "via": "标题",
+                         "alternatives": ["芬兰湾"], "status": "PENDING"}},
+              pdir / "map_confirm.json")
+    problems = review.gate("ep-999")
+    assert any("地图定位待人工确认" in p for p in problems)
+    save_json({"seg02": {"place": "乌斯季卢加", "status": "CONFIRMED",
+                         "chosen": "乌斯季卢加", "confirmed_at": "t"}},
+              pdir / "map_confirm.json")
+    assert not [p for p in review.gate("ep-999") if "地图" in p]
+
+
+def test_production_report_verdict(tmp_path, monkeypatch):
+    """报告结论：无阻断 + ready → 可发布；PENDING 地图 → 不可发布并点名阻断项。"""
+    from src import production_report, store
+    from src.jsonio import save_json
+    _fake_release(tmp_path, monkeypatch)
+    pdir = tmp_path / "projects" / "ep-999"
+    rep = production_report.build("ep-999")
+    assert rep["verdict"] == "可发布"
+    assert len(rep["checks"]) >= 5
+    save_json({"seg02": {"place": "x", "status": "PENDING",
+                         "alternatives": ["y"]}}, pdir / "map_confirm.json")
+    rep2 = production_report.build("ep-999")
+    assert rep2["verdict"] == "不可发布" and "地图定位" in rep2["blockers"]
+    assert (pdir / "production_report.md").exists()
+
+
+def test_publish_intent_state_unknown(tmp_path, monkeypatch):
+    """上传抛错 → intent 标 unknown（禁止自动重试的持久依据）。"""
+    import sys
+    from src import review, uploader
+    from src.jsonio import load_json
+    _publish_once(tmp_path, monkeypatch) if False else None
+    calls = _stub_sau(monkeypatch)
+    pdir = _fake_release(tmp_path, monkeypatch)
+    (pdir / "output" / "upload_info.txt").write_text(
+        "标题: t\n简介:\n简介内容够长\n", encoding="utf-8")
+    review.approve("ep-999", "放行")
+    stub = sys.modules["sau_bridge"]
+
+    def _boom(**kw):
+        raise RuntimeError("boom")
+
+    stub.upload = _boom
+    import pytest
+    with pytest.raises(RuntimeError, match="boom"):
+        uploader.publish("ep-999")
+    intent = load_json(pdir / "output" / "publishing.json")
+    assert intent["state"] == "unknown" and "boom" in intent["error"]
+    assert calls["upload"] == 0
