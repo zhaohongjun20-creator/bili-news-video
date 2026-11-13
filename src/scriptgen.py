@@ -179,21 +179,30 @@ def build_script(pid: str) -> dict:
     target_s = max(60, min(200, int(len(refs) * 32 + 24)))
 
     script = None
+    fail_reason = ""
     key = api_keys()["zhipu"]
     if key and refs:
-        obj, _ = chat_json_ex(
-            key, _PROMPT.format(show=brief.get("show_label") or cfg["show"]["name"],
-                                target_s=target_s,
-                                brief=_brief_digest(brief)),
-            model=cfg["glm"]["model"], temperature=cfg["glm"]["temperature"],
-            max_tokens=cfg["glm"]["max_tokens"], timeout=cfg["glm"]["timeout_s"],
-            required_keys=("title", "segments"))
-        if obj is not None and _validate(obj, refs):
-            script = obj
+        tokens = int(cfg["glm"]["max_tokens"])
+        for attempt in (1, 2):                    # 二次重试给足 tokens
+            obj, err = chat_json_ex(
+                key, _PROMPT.format(show=brief.get("show_label") or cfg["show"]["name"],
+                                    target_s=target_s,
+                                    brief=_brief_digest(brief)),
+                model=cfg["glm"]["model"], temperature=cfg["glm"]["temperature"],
+                max_tokens=tokens, timeout=cfg["glm"]["timeout_s"],
+                required_keys=("title", "segments"))
+            if obj is not None and _validate(obj, refs):
+                script = obj
+                break
+            reason = err if obj is None else "JSON 可解析但未过结构校验（缺段/重复 ref 等）"
+            fail_reason = f"第{attempt}次：{reason}"
+            tokens *= 2
     mode = "glm"
     if script is None:
         script = _template_script(brief, cfg)
         mode = "template_fallback"
+        if fail_reason:
+            script["warnings"].append(f"GLM 稿未采用（{fail_reason}）")
 
     script["meta"] = {"pid": pid, "date": brief["date"],
                       "show": cfg["show"]["name"],
@@ -210,7 +219,10 @@ def build_script(pid: str) -> dict:
         s["id"] = f"seg{i:02d}"
         s["est_s"] = _estimate_s(s["narration"])
     save_json(script, store.project_dir(pid) / "script.json")
-    store.mark_stage(pid, "script", f"{mode} / {len(script['segments'])} 段")
+    note = f"{mode} / {len(script['segments'])} 段"
+    if fail_reason:
+        note += f" / GLM未采用({fail_reason[:60]})"
+    store.mark_stage(pid, "script", note)
     return script
 
 
@@ -260,8 +272,13 @@ def narration_lines(narration: str, width: int = 16) -> list[str]:
     for ln in lines:
         core = _re.sub(r"[。！？；：，、,.]+", "", ln).strip()
         if merged and len(core) <= 1:
-            merged[-1] = (merged[-1] + ln).strip()
+            prev = merged[-1]
+            # 上行已有句末标点时不重复追加（防「。。」）
+            if prev.endswith(tuple("。！？；，,")) and ln.startswith(tuple("。！？；，,")):
+                ln = ln.lstrip("。！？；，,")
+            merged[-1] = (prev + ln).strip()
         elif core:
             merged.append(ln)
-    lines = merged
+    # 叠标点兜底清理（源文本里可能本就有「。。」）
+    lines = [_re.sub(r"([。！？；，、,.])\1+", r"\1", ln) for ln in merged]
     return lines or [narration]
