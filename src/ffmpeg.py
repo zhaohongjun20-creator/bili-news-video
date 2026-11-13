@@ -137,6 +137,31 @@ def stderr_has_audio(stderr: str) -> bool:
     return _AUDIO_STREAM.search(stderr) is not None
 
 
+def parse_blackdetect(stderr: str) -> list[tuple[float, float]]:
+    """纯函数：blackdetect stderr → [(start, duration)]。"""
+    return [(float(m.group(1)), float(m.group(2))) for m in
+            re.finditer(r"black_start:\s*([\d.]+)[^\n]*?black_duration:\s*([\d.]+)",
+                        stderr)]
+
+
+def parse_freezedetect(stderr: str) -> list[tuple[float, float]]:
+    """纯函数：freezedetect stderr → [(start, duration)]（freeze_start 与
+    后续 freeze_duration 配对；无配对的 start 丢弃）。"""
+    out: list[tuple[float, float]] = []
+    starts = [float(m.group(1)) for m in
+              re.finditer(r"freeze_start:\s*([\d.]+)", stderr)]
+    durs = [float(m.group(1)) for m in
+            re.finditer(r"freeze_duration:\s*([\d.]+)", stderr)]
+    return list(zip(starts, durs))
+
+
+def parse_silencedetect(stderr: str) -> list[tuple[float, float]]:
+    """纯函数：silencedetect stderr → [(start, duration)]。"""
+    return [(float(m.group(1)), float(m.group(2))) for m in
+            re.finditer(r"silence_start:\s*([\d.]+)[\s\S]*?silence_duration:\s*([\d.]+)",
+                        stderr)]
+
+
 def has_audio_stream(path) -> bool:
     """媒体是否含音轨。ffprobe 查流；ffprobe 异常/缺失时从 ffmpeg -i stderr 找 Audio 流行。"""
     p = Path(path)

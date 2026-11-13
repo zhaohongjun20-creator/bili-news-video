@@ -438,6 +438,19 @@ def map_applicable(headline: str) -> bool:
     return bool(_match_focus(headline))
 
 
+def _confirmed_place(pid: str, seg_id: str) -> tuple[dict | None, dict | None]:
+    """人工确认优先于自动定位：CONFIRMED 时用 chosen 解析完整定位
+    （坐标/类型/ISO 全套）。chosen 无法解析 → (None, record)——
+    调用方必须退非地图卡，不允许静默回退到自动定位。"""
+    rec = (load_json(store.project_dir(pid) / "map_confirm.json") or {}).get(seg_id)
+    if not rec or rec.get("status") != "CONFIRMED":
+        return None, rec
+    chosen = str(rec.get("chosen") or rec.get("place") or "")
+    if not chosen:
+        return None, rec
+    return resolve_place(chosen, ""), rec
+
+
 def _draw_map(img, d, seg, meta) -> None:
     """真实底图卡：Natural Earth 50m 国界，焦点国家红色高亮，外围行为者
     右栏标签+细线指向焦点。数据缺失时退回棋盘格示意卡（老版）。"""
@@ -446,7 +459,13 @@ def _draw_map(img, d, seg, meta) -> None:
     headline = card.get("headline") or "巴尔干动向"
 
     if not map_applicable(headline):
-        place = resolve_place(headline, seg.get("narration", ""))
+        # 人工确认优先：CONFIRMED 用 chosen 绘制；chosen 解析不了 → 明确退大字卡
+        place, rec = _confirmed_place(meta["pid"], seg["id"])
+        if place is None and rec and rec.get("status") == "CONFIRMED":
+            _draw_headline(img, d, seg, meta)
+            return
+        if place is None:
+            place = resolve_place(headline, seg.get("narration", ""))
         if place and _load_world():
             _draw_map_dynamic(img, d, seg, meta, place)
             return
@@ -666,7 +685,7 @@ def render_cards(pid: str) -> list[dict]:
     if first_item:
         hook_place = resolve_place(first_item.get("card", {}).get("headline", ""),
                                    first_item.get("narration", ""))
-    meta = dict(script["meta"], hook_place=hook_place,
+    meta = dict(script["meta"], pid=pid, hook_place=hook_place,
                 hook_line=(first_item.get("card", {}).get("headline", "")
                            if first_item else ""))
     out = []
@@ -706,8 +725,11 @@ def _update_map_confirm(pid: str, script: dict) -> None:
         if not place:
             continue                            # 大字卡：无定位
         prev = mc.get(seg["id"])
-        if (prev and prev.get("status") == "CONFIRMED"
-                and prev.get("place") == place["name"]):
+        if prev and prev.get("status") == "CONFIRMED":
+            # 人工确认优先：自动结果与确认不一致时也绝不覆盖
+            chosen = str(prev.get("chosen") or prev.get("place") or "")
+            prev["chosen_resolved"] = bool(chosen and resolve_place(chosen, ""))
+            prev.setdefault("place", chosen)
             continue
         mc[seg["id"]] = {"place": place["name"], "via": place.get("via", "标题"),
                          "alternatives": place.get("alternatives", []),

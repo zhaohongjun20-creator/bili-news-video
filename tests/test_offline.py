@@ -868,6 +868,7 @@ def test_build_script_records_glm_failure(tmp_path, monkeypatch):
     """GLM 两次都失败 → 模板稿，但失败原因必须留在 warnings，且重试了一次。"""
     from src import scriptgen, store
     from src.jsonio import save_json
+    from src import store
     monkeypatch.setattr(store, "ROOT", tmp_path)
     pdir = tmp_path / "projects" / "ep-998"
     pdir.mkdir(parents=True)
@@ -1170,3 +1171,104 @@ def test_publish_intent_state_unknown(tmp_path, monkeypatch):
     intent = load_json(pdir / "output" / "publishing.json")
     assert intent["state"] == "unknown" and "boom" in intent["error"]
     assert calls["upload"] == 0
+
+
+# ---- 第六轮:地图确认进入绘制 / 人工稿来源精度 / 检测器解析 / 报告口径 -----
+def test_confirmed_place_overrides_auto(tmp_path, monkeypatch):
+    """自动定位 A、人工确认 B → 绘制输入必须解析为 B。"""
+    from src import cards
+    from src.jsonio import save_json
+    from src import store
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    pdir = tmp_path / "projects" / "ep-995"
+    pdir.mkdir(parents=True)
+    save_json({"seg02": {"place": "乌斯季卢加", "status": "CONFIRMED",
+                         "chosen": "霍尔木兹", "confirmed_at": "2026-11-14T00:00"}},
+              pdir / "map_confirm.json")
+    place, rec = cards._confirmed_place("ep-995", "seg02")
+    assert place and place["name"] == "霍尔木兹" and abs(place["lat"] - 26.6) < 0.01
+    assert rec["status"] == "CONFIRMED"
+
+
+def test_confirmed_place_unresolvable_returns_none(tmp_path, monkeypatch):
+    """chosen 无法解析 → (None, rec)：调用方退大字卡，不静默用自动定位。"""
+    from src import cards
+    from src.jsonio import save_json
+    from src import store
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    pdir = tmp_path / "projects" / "ep-995"
+    pdir.mkdir(parents=True)
+    save_json({"seg02": {"place": "乌斯季卢加", "status": "CONFIRMED",
+                         "chosen": "不存在的地名XYZ", "confirmed_at": "t"}},
+              pdir / "map_confirm.json")
+    place, rec = cards._confirmed_place("ep-995", "seg02")
+    assert place is None and rec["chosen"] == "不存在的地名XYZ"
+
+
+def test_update_map_confirm_never_overwrites_confirmed(tmp_path, monkeypatch):
+    """自动定位与人工确认不一致时，不得覆盖 CONFIRMED。"""
+    from src import cards
+    from src.jsonio import load_json, save_json
+    from src import store
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    pdir = tmp_path / "projects" / "ep-995"
+    pdir.mkdir(parents=True)
+    save_json({"seg02": {"place": "霍尔木兹", "status": "CONFIRMED",
+                         "chosen": "霍尔木兹", "confirmed_at": "t"}},
+              pdir / "map_confirm.json")
+    script = {"segments": [{"id": "seg02", "kind": "item", "narration": "n",
+                            "card": {"type": "map", "headline": "乌斯季卢加"}}]}
+    cards._update_map_confirm("ep-995", script)   # 自动会解析为乌斯季卢加
+    mc = load_json(pdir / "map_confirm.json")
+    assert mc["seg02"]["place"] == "霍尔木兹" and mc["seg02"]["chosen_resolved"] is True
+
+
+def test_map_gate_stale_render_and_unresolved(tmp_path, monkeypatch):
+    """确认后未重渲 → 拦；chosen 无法解析 → 拦。"""
+    import os
+    from src import review
+    from src.jsonio import save_json
+    _fake_release(tmp_path, monkeypatch)
+    pdir = tmp_path / "projects" / "ep-999"
+    final = pdir / "output" / "final.mp4"
+    save_json({"seg02": {"place": "霍尔木兹", "status": "CONFIRMED",
+                         "chosen": "霍尔木兹", "chosen_resolved": True,
+                         "confirmed_at": "2026-11-14T00:00:00"}},
+              pdir / "map_confirm.json")
+    os.utime(final, (1_000_000_000, 1_000_000_000))   # 成片早于确认时间
+    problems = review.gate("ep-999")
+    assert any("未重新渲染成片" in p for p in problems)
+    save_json({"seg02": {"place": "不存在地名", "status": "CONFIRMED",
+                         "chosen": "不存在地名XYZ", "chosen_resolved": False,
+                         "confirmed_at": "2026-11-14T00:00:00"}},
+              pdir / "map_confirm.json")
+    problems = review.gate("ep-999")
+    assert any("无法解析" in p for p in problems)
+
+
+def test_manual_sources_precision():
+    """「部分地区」不得因「部」误判有来源；「据某通讯社报道」应通过。"""
+    from src import factcheck
+    script = {"segments": [
+        {"id": "seg02", "kind": "item",
+         "narration": "部分地区发生变化，事态仍在发展。"},
+        {"id": "seg03", "kind": "item",
+         "narration": "据某通讯社报道，当地情况正在恢复。"},
+        {"id": "seg04", "kind": "item",
+         "narration": "港口恢复运转，情况持续好转。"}]}
+    issues = factcheck.check_manual_sources(script)
+    blocked = {i["seg"] for i in issues if i["rule"] == "RL-SRC-M"}
+    assert blocked == {"seg02", "seg04"}              # seg03 有「据…报道」通过
+
+
+def test_detector_parsers():
+    """黑屏/冻结/静音解析：以真实 ffmpeg 输出格式为样本。"""
+    from src import ffmpeg
+    assert ffmpeg.parse_blackdetect(
+        "black_start:0 black_end:4.96 black_duration:4.96") == [(0.0, 4.96)]
+    assert ffmpeg.parse_freezedetect(
+        "lavfi.freezedetect.freeze_start: 0\n"
+        "lavfi.freezedetect.freeze_duration: 4.9") == [(0.0, 4.9)]
+    assert ffmpeg.parse_silencedetect(
+        "silence_start: 0\nsilence_end: 8 | silence_duration: 8") == [(0.0, 8.0)]
+    assert ffmpeg.parse_blackdetect("no events") == []

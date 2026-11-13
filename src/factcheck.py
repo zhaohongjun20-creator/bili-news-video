@@ -143,21 +143,23 @@ def check_entities(brief: dict, script: dict) -> list[dict]:
 
 
 # ---- 人工稿来源可追溯（不强制徽标，但必须有来源交代） ----------------------
-_MANUAL_SRC = ("据", "称", "报道", "宣布", "透露", "援引", "确认", "表示",
-               "官方", "媒体", "通讯社", "消息", "来源", "声明", "部")
+# 精确标记：不用单字宽泛词（「部」会误匹配「部分地区」）；「据」排除「部分/据说」
+_MANUAL_SRC_RES = (re.compile(r"据(?![分此说闻])"),
+                   re.compile(r"报道|宣布|透露|援引|表示|确认|声称|声明"),
+                   re.compile(r"官方|媒体|通讯社|消息来源|发言人|外交部|国防部|参谋部"))
 
 
 def check_manual_sources(script: dict) -> list[dict]:
     """人工稿每条 item/china/mainline 段必须有来源交代；没有 → BLOCK。
-    人工稿不走 AI 稿徽标格式，但「不可追溯」同样不放行。"""
+    人工稿不走 AI 稿徽标格式；本检查是「可追溯性」初筛，不是事实核验本身。"""
     issues: list[dict] = []
     for seg in script.get("segments", []):
         if seg.get("kind") not in ("item", "china", "mainline"):
             continue
         text = seg.get("narration", "")
-        if not any(m in text for m in _MANUAL_SRC):
+        if not any(p.search(text) for p in _MANUAL_SRC_RES):
             issues.append({"rule": "RL-SRC-M", "level": "block",
                            "seg": seg.get("id", ""),
-                           "hit": "人工稿段落没有任何来源交代（据/称/报道/官方…），"
+                           "hit": "人工稿段落没有任何来源交代（据X报道/称/官方…），"
                                   "无法追溯——补来源或删段"})
     return issues

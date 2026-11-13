@@ -142,8 +142,11 @@ def cmd_map_confirm(a) -> None:
         mc[a.seg]["chosen"] = a.place
     mc[a.seg]["confirmed_at"] = store.now()
     save_json(mc, pdir / "map_confirm.json")
+    # 确认必须实际进入画面：作废 render 及下游，强制重渲重审
+    store.redo_stage(a.pid, "render")
     print(f"{a.pid}/{a.seg}: 地图定位已人工确认 → "
           f"{mc[a.seg].get('chosen') or mc[a.seg]['place']}")
+    print("render 已作废：运行 python cli.py make 重新出片，看片后再 approve")
 
 
 def cmd_publish_prepare(a) -> None:

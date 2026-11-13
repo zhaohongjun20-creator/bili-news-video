@@ -31,12 +31,18 @@ def build(pid: str) -> dict:
     def add(name: str, status: str, detail: str = "") -> None:
         checks.append({"check": name, "status": status, "detail": detail})
 
-    # 1) 信源追溯
+    # 1) 信源追溯（口径与发布闸门一致：记录缺失/无链接显性标 WARN，不静默）
     rows = reg.get("sources", [])
     url_ok = sum(1 for r in rows if r.get("url"))
-    add("信源追溯",
-        "PASS" if rows and url_ok == len(rows) else ("WARN" if rows else "N/A"),
-        f"信源 {len(rows)} 条，含链接 {url_ok} 条（明细见 sources.md）")
+    if rows and url_ok == len(rows):
+        add("信源追溯", "PASS", f"信源 {len(rows)} 条全部含链接（明细见 sources.md）")
+    elif rows:
+        add("信源追溯", "WARN",
+            f"信源 {len(rows)} 条，{len(rows) - url_ok} 条无公开链接——人工核对该部分")
+    elif brief.get("items"):
+        add("信源追溯", "WARN", "有简报条目但信源记录缺失（sources.json 为空）——人工核对")
+    else:
+        add("信源追溯", "N/A", "人工稿：链接归档于 sources.json（如稿内提供）")
     # 2) 红线/事实核验
     issues = hammer.get("issues", [])
     blocks = [i for i in issues if i.get("level") == "block"]
@@ -57,11 +63,15 @@ def build(pid: str) -> dict:
     add("视频规格/QC", "PASS" if qc.get("ok") else "FAIL",
         f"{qc.get('duration', 0):.1f}s / {qc.get('mean_volume_db', 0):.0f}dB"
         if qc.get("ok") else "；".join(qc.get("problems", []))[:200])
-    # 5) 字幕与音频（字幕文件缺失由 QC 统一判 FAIL，这里不重复惩罚）
+    # 5) 字幕与音频（能力边界如实标注：本项不是字幕-语音语义一致性验证）
     add("字幕/音频同步", "PASS" if qc.get("ok") else "FAIL",
-        "ASS 事件均在音频窗口内（qc 语速启发式 + 时长自洽）"
-        + ("" if (pdir / "output" / "subs.ass").exists() else "；字幕文件缺失(QC 已拦)"))
-    # 6) 投稿状态（信息项：不作为放行阻断——未投稿本来就是常态）
+        "已检：时间窗/语速启发式/时长自洽；未检：字幕与语音语义一致性（需 ASR）"
+        "——人工审片覆盖")
+    # 6) 黑屏/冻结/静音（ffmpeg 原生检测器）
+    blk = [p for p in qc.get("problems", []) if p.startswith(("黑屏", "冻结", "异常静音"))]
+    add("黑屏/冻结/静音", "FAIL" if blk else "PASS",
+        "；".join(blk) if blk else "blackdetect/freezedetect/silencedetect 无命中")
+    # 7) 投稿状态（信息项：不作为放行阻断——未投稿本来就是常态）
     if pres.get("bvid"):
         add("投稿状态", "PUBLISHED", pres.get("url", ""))
     elif intent:

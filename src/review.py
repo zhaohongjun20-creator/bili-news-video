@@ -3,6 +3,7 @@
 
 审美与内容裁量永远是人工的事——机器只保证规格合格（qc），不放行发布。
 """
+from datetime import datetime
 from pathlib import Path
 
 from src import store
@@ -44,7 +45,7 @@ def gate(pid: str) -> list[str]:
         elif abs(float(qc.get("duration", -1)) - float(rj.get("duration", -2))) > 1.0:
             problems.append("QC 报告与当前成片时长不一致（疑似旧 QC）——redo qc")
 
-    # 地图人工确认：多候选地点未确认 → 不进最终发布审批
+    # 地图人工确认：PENDING → 拦截；CONFIRMED 但未重渲/地点无法解析 → 拦截
     mc = load_json(pdir / "map_confirm.json") or {}
     for k in sorted(mc):
         v = mc[k]
@@ -52,6 +53,23 @@ def gate(pid: str) -> list[str]:
             problems.append(
                 f"地图定位待人工确认（{k}→{v.get('place')}，"
                 f"另命中 {v.get('alternatives')}）——python cli.py map-confirm {pid} {k}")
+        elif v.get("status") == "CONFIRMED":
+            if v.get("chosen_resolved") is False:
+                problems.append(
+                    f"人工确认地点「{v.get('place')}」无法解析（该卡已退大字卡）"
+                    f"——python cli.py map-confirm {pid} {k} 重新确认")
+                continue
+            final = rj.get("final", "")
+            ca = str(v.get("confirmed_at", ""))
+            if final and ca and Path(final).exists():
+                try:
+                    ctime = datetime.fromisoformat(ca).timestamp()
+                except ValueError:
+                    ctime = 0.0
+                if Path(final).stat().st_mtime < ctime:
+                    problems.append(
+                        f"{k} 人工确认后未重新渲染成片——先 make 再发布（确认结果"
+                        "必须实际进入画面）")
     return problems
 
 
