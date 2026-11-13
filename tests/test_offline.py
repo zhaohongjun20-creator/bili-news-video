@@ -822,3 +822,71 @@ def test_map_applicable_region_gate():
     assert not cards.map_applicable("乌斯季卢加港区起火")        # 波罗的海
     assert not cards.map_applicable("集安组织暂停亚美尼亚表决权")  # 中亚
     assert not cards.map_applicable("拉斐尔发布超级冰巡航导弹")    # 以色列
+
+
+# ---- A批修复:双标点 / GLM失败留痕 / 解释器守卫 / hook条数 ----------------
+def test_narration_lines_no_double_punct():
+    import re
+    from src import scriptgen
+    t = ("11月12日，英国海事贸易行动中心与联合海事信息中心在更新中记录了四起油轮事件。"
+         "伊朗革命卫队海军称两艘油轮发生剧烈爆炸。。信源级别【官方】。")
+    lines = scriptgen.narration_lines(t)
+    for ln in lines:
+        assert not re.search(r"[。！？，；]{2,}", ln), ln
+        core = re.sub(r"[。！？；：，、,.]+", "", ln).strip()
+        assert len(core) > 1, ln
+    assert lines[-1].endswith("信源级别【官方】。")
+
+
+def test_hook_count_fix():
+    from src import redlines
+    fixed, note = redlines.fix_hook_count("今天五条快讯，俄军舰遇袭。", 6)
+    assert "六条快讯" in fixed and note and "6" in note
+    assert redlines.fix_hook_count("今天六条快讯。", 6)[1] is None
+    fixed2, note2 = redlines.fix_hook_count("本期共4条动态。", 6)
+    assert "六条" in fixed2 and note2
+    assert redlines.fix_hook_count("今天带你看最新动向。", 6)[1] is None
+    fixed3, _ = redlines.fix_hook_count("今天十一条快讯。", 11)
+    assert "十一条" in fixed3
+
+
+def test_ensure_interpreter_guard(monkeypatch):
+    import pytest
+    import cli
+    monkeypatch.setattr(
+        sys, "executable",
+        r"C:\Program Files\LibreOffice\program\python-core-3.13.17\python.exe")
+    with pytest.raises(SystemExit):
+        cli.ensure_interpreter()
+    monkeypatch.setattr(
+        sys, "executable",
+        r"C:\Users\15804\AppData\Local\Programs\Python\Python314\python.exe")
+    cli.ensure_interpreter()
+
+
+def test_build_script_records_glm_failure(tmp_path, monkeypatch):
+    """GLM 两次都失败 → 模板稿，但失败原因必须留在 warnings，且重试了一次。"""
+    from src import scriptgen, store
+    from src.jsonio import save_json
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    pdir = tmp_path / "projects" / "ep-998"
+    pdir.mkdir(parents=True)
+    save_json({"pid": "ep-998", "stages": {}}, pdir / "manifest.json")
+    save_json({"date": "2026-11-13", "region": "测试",
+               "items": [{"title": f"条目{i}", "summary": f"第{i}条测试内容。",
+                          "sources": [{"tier": "官方", "name": "测试"}],
+                          "chess": "", "china_link": "", "risk": ""} for i in (1, 2)],
+               "mainlines": [], "excluded_refs": []},
+              pdir / "briefing.json")
+    calls = {"n": 0}
+
+    def fake_chat(key, prompt, **kw):
+        calls["n"] += 1
+        return None, "GLM boom"
+
+    monkeypatch.setattr(scriptgen, "chat_json_ex", fake_chat)
+    monkeypatch.setattr(scriptgen, "api_keys", lambda: {"zhipu": "k"})
+    s = scriptgen.build_script("ep-998")
+    assert s["meta"]["mode"] == "template_fallback"
+    assert calls["n"] == 2
+    assert any("GLM boom" in w for w in s["warnings"])
