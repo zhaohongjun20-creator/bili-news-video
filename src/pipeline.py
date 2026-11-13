@@ -41,4 +41,7 @@ def make(pid: str, offline: bool = False) -> dict:
         if not report["ok"]:
             raise PipelineError(f"QC 未过：{report['problems']}")
         steps.append("qc")
+    from src import production_report
+    production_report.build(pid)
+    steps.append("report")
     return {"pid": pid, "steps": steps or ["全部阶段已完成（断点续跑）"]}
