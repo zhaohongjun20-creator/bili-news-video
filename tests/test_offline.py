@@ -890,3 +890,27 @@ def test_build_script_records_glm_failure(tmp_path, monkeypatch):
     assert s["meta"]["mode"] == "template_fallback"
     assert calls["n"] == 2
     assert any("GLM boom" in w for w in s["warnings"])
+
+
+# ---- 全球自动定位地图卡与地球仪 ------------------------------------------
+def test_resolve_place_regions():
+    from src import cards
+    p = cards.resolve_place("乌克兰无人机打击乌斯季卢加港区", "")
+    assert p and p["name"] == "乌斯季卢加" and abs(p["lat"] - 59.66) < 0.01
+    p2 = cards.resolve_place("霍尔木兹海峡油轮事件", "")
+    assert p2 and abs(p2["lat"] - 26.6) < 0.01
+    p3 = cards.resolve_place("", "集安组织峰会在莫斯科举行")
+    assert p3 and p3["name"] == "莫斯科"
+    assert cards.resolve_place("普通条目没有任何地名信息", "") is None
+
+
+def test_globe_projection_math():
+    from src import cards
+    x, y, c = cards._globe_project((0, 0), 0, 0, 100, 500, 500)
+    assert abs(x - 500) < 1e-6 and abs(y - 500) < 1e-6 and c >= 1
+    x, y, _ = cards._globe_project((90, 0), 0, 0, 100, 500, 500)
+    assert abs(x - 600) < 1e-6 and abs(y - 500) < 1e-6
+    x, y, _ = cards._globe_project((0, 90), 0, 0, 100, 500, 500)
+    assert abs(x - 500) < 1e-6 and abs(y - 400) < 1e-6
+    _, _, c = cards._globe_project((180, 0), 0, 0, 100, 500, 500)
+    assert c < 0

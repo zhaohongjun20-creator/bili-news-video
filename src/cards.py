@@ -141,6 +141,11 @@ def _draw_hook(img, d, seg, meta) -> None:
     n = meta.get("n_items", 0)
     sub = f"本期 {n} 条动态" if n else "本期动态"
     d.text((120, 600), sub, font=_font(56), fill=DIM)
+    # 开场地球仪：转到当期主地点（无地点则不画，保持原版式）
+    place = meta.get("hook_place")
+    if place and _load_world():
+        _draw_globe(d, place, R=280, cx=1400, cy=620,
+                    focus_iso=place.get("iso") or "")
 
 
 def _draw_headline(img, d, seg, meta) -> None:
@@ -218,6 +223,184 @@ def _match_focus(headline: str) -> list[str]:
     return out
 
 
+# ---- 全球自动定位：地名坐标表 + 动态视口 + 地球仪 ------------------------
+# 手工地名表（坐标为示意级精度，卡面标注「底图 Natural Earth」）。
+# 刻意不含中国地名：涉华内容走大字卡，不给错误地域暗示。
+# entry: (lon, lat, 视野半径°, 类型, 焦点国ISO)；类型 city/country/sea
+GAZETTEER = {
+    "乌斯季卢加": (28.4, 59.66, 3, "city", "RUS"),
+    "圣彼得堡": (30.3, 59.95, 4, "city", "RUS"),
+    "芬兰湾": (26.5, 59.8, 6, "sea", None),
+    "波罗的海": (19.0, 57.0, 10, "sea", None),
+    "立陶宛": (23.9, 55.2, 4, "country", "LTU"),
+    "拉脱维亚": (24.9, 56.9, 4, "country", "LVA"),
+    "爱沙尼亚": (25.5, 58.7, 4, "country", "EST"),
+    "维尔纽斯": (25.28, 54.69, 3, "city", "LTU"),
+    "里加": (24.1, 56.95, 3, "city", "LVA"),
+    "霍尔木兹": (56.5, 26.6, 5, "sea", None),
+    "阿曼湾": (58.8, 24.4, 6, "sea", None),
+    "波斯湾": (51.5, 27.0, 8, "sea", None),
+    "哈伊马角": (55.95, 25.75, 3, "city", "ARE"),
+    "阿联酋": (54.2, 24.0, 5, "country", "ARE"),
+    "阿曼": (57.0, 21.5, 6, "country", "OMN"),
+    "伊朗": (53.7, 32.4, 9, "country", "IRN"),
+    "德黑兰": (51.4, 35.7, 3, "city", "IRN"),
+    "以色列": (34.9, 31.4, 4, "country", "ISR"),
+    "特拉维夫": (34.78, 32.08, 2.5, "city", "ISR"),
+    "红海": (38.0, 20.5, 10, "sea", None),
+    "苏伊士": (32.55, 30.0, 3, "city", "EGY"),
+    "黑海": (34.0, 43.5, 8, "sea", None),
+    "乌克兰": (31.5, 49.0, 9, "country", "UKR"),
+    "基辅": (30.52, 50.45, 3, "city", "UKR"),
+    "敖德萨": (30.73, 46.48, 3, "city", "UKR"),
+    "俄罗斯": (40.0, 57.5, 14, "country", "RUS"),
+    "莫斯科": (37.62, 55.75, 4, "city", "RUS"),
+    "哈萨克斯坦": (67.0, 48.0, 12, "country", "KAZ"),
+    "吉尔吉斯斯坦": (74.5, 41.5, 5, "country", "KGZ"),
+    "塔吉克斯坦": (71.0, 38.8, 5, "country", "TJK"),
+    "亚美尼亚": (45.0, 40.2, 4, "country", "ARM"),
+    "土耳其": (35.0, 39.0, 7, "country", "TUR"),
+    "安卡拉": (32.85, 39.93, 3, "city", "TUR"),
+    "阿根廷": (-64.5, -36.5, 12, "country", "ARG"),
+    "布宜诺斯艾利斯": (-58.4, -34.6, 3, "city", "ARG"),
+    "英国": (-1.6, 52.8, 7, "country", "GBR"),
+    "伦敦": (-0.12, 51.5, 3, "city", "GBR"),
+    "米尔德霍尔": (0.49, 52.36, 2.5, "city", "GBR"),
+    "Mildenhall": (0.49, 52.36, 2.5, "city", "GBR"),
+    "德国": (10.3, 51.2, 7, "country", "DEU"),
+    "法国": (2.5, 46.6, 7, "country", "FRA"),
+    "北大西洋": (-28.0, 47.0, 15, "sea", None),
+    "大西洋网": (-12.0, 54.0, 9, "sea", "GBR"),
+    "大西洋": (-32.0, 38.0, 20, "sea", None),
+}
+_KIND_RANK = {"city": 0, "country": 1, "sea": 2}      # 同长度时 city 优先于 sea
+
+WORLD_GEO_PATH = ROOT / "assets" / "geo" / "world_50m.json"
+_WORLD_CACHE: list | None = None
+
+
+def _load_world() -> list:
+    global _WORLD_CACHE
+    if _WORLD_CACHE is None:
+        _WORLD_CACHE = (json.loads(WORLD_GEO_PATH.read_text(encoding="utf-8"))["features"]
+                        if WORLD_GEO_PATH.exists() else [])
+    return _WORLD_CACHE
+
+
+def resolve_place(headline: str = "", narration: str = "") -> dict | None:
+    """标题优先（同长取 city>country>sea），标题无命中再扫口播。"""
+    for text in (headline or "", narration or ""):
+        if not text:
+            continue
+        best = None
+        for name, val in GAZETTEER.items():
+            if name in text:
+                key = (-len(name), _KIND_RANK.get(val[3], 3))
+                if best is None or key < best[0]:
+                    best = (key, {"name": name, "lon": val[0], "lat": val[1],
+                                  "radius": val[2], "kind": val[3], "iso": val[4]})
+        if best:
+            return best[1]
+    return None
+
+
+def _merc_bbox_viewport(lon: float, lat: float, radius: float,
+                        box: tuple) -> tuple:
+    """以 (lon,lat) 为中心、纬向半径 radius° 的 Mercator 视口 bbox。"""
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    m_c = _merc_y(max(-75.0, min(75.0, lat)))
+    half_m = math.radians(radius)
+    lat1 = min(80.0, 2 * math.degrees(math.atan(math.exp(min(10.0, m_c + half_m)))) - 90)
+    lat0 = max(-80.0, 2 * math.degrees(math.atan(math.exp(max(-10.0, m_c - half_m)))) - 90)
+    dlon = min(math.degrees((2 * half_m) * (w / h) / 2), 179.0)
+    return lon - dlon, lat0, lon + dlon, lat1
+
+
+def _proj_view(pt: tuple, view: tuple, box: tuple) -> tuple[int, int]:
+    lon0, lat0, lon1, lat1 = view
+    m = _merc_y(max(-85.0, min(85.0, pt[1])))
+    m0, m1 = _merc_y(lat0), _merc_y(lat1)
+    x0, y0, x1, y1 = box
+    return (int((pt[0] - lon0) / (lon1 - lon0) * (x1 - x0) + x0),
+            int((m1 - m) / (m1 - m0) * (y1 - y0) + y0))
+
+
+def _globe_project(pt: tuple, lon0: float, lat0: float,
+                   R: float, cx: float, cy: float) -> tuple[float, float, float]:
+    """正交投影（地球仪）。返回 (screen_x, screen_y, cosc)；cosc<0 为背面。"""
+    lam = math.radians(pt[0] - lon0)
+    phi = math.radians(pt[1])
+    phi0 = math.radians(lat0)
+    cosc = math.sin(phi0) * math.sin(phi) + math.cos(phi0) * math.cos(phi) * math.cos(lam)
+    x = R * math.cos(phi) * math.sin(lam)
+    y = R * (math.cos(phi0) * math.sin(phi) - math.sin(phi0) * math.cos(phi) * math.cos(lam))
+    return cx + x, cy - y, cosc
+
+
+def _limb_point(a: tuple, b: tuple, lon0, lat0, R, cx, cy) -> tuple[float, float]:
+    """经纬度两点间二分求地平线交点（a 可见，b 不可见）。"""
+    for _ in range(10):
+        mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        _, _, c = _globe_project(mid, lon0, lat0, R, cx, cy)
+        if c >= 0:
+            a = mid
+        else:
+            b = mid
+    x, y, _ = _globe_project(a, lon0, lat0, R, cx, cy)
+    return x, y
+
+
+def _globe_ring(ring: list, lon0, lat0, R, cx, cy) -> list[tuple[float, float]]:
+    """环投影到地球仪：背面点裁掉，跨地平线的边插到地平线上。"""
+    pts: list[tuple[float, float]] = []
+    prev = None                                     # (lon, lat, vis)
+    for pt in ring:
+        _, _, c = _globe_project(pt, lon0, lat0, R, cx, cy)
+        vis = c >= 0
+        if prev is not None and vis != prev[2]:
+            a, b = (prev[:2], pt) if prev[2] else (pt, prev[:2])
+            pts.append(_limb_point(a, b, lon0, lat0, R, cx, cy))
+        if vis:
+            x, y, _ = _globe_project(pt, lon0, lat0, R, cx, cy)
+            pts.append((x, y))
+        prev = (pt[0], pt[1], vis)
+    return pts
+
+
+def _draw_globe(d: ImageDraw.ImageDraw, place: dict, R: float,
+                cx: float, cy: float, focus_iso: str = "") -> None:
+    """正交投影地球仪：海洋圆盘 + 经纬网 + 陆地 + 焦点标记。"""
+    lon0, lat0 = place["lon"], place["lat"]
+    d.ellipse([cx - R, cy - R, cx + R, cy + R], fill=SEA, outline=BORDER, width=3)
+    # 经纬网（每 30°）
+    for mer in range(-180, 180, 30):
+        pts = _globe_ring([(mer, lat) for lat in range(-80, 81, 8)],
+                          lon0, lat0, R - 2, cx, cy)
+        if len(pts) >= 2:
+            d.line(pts, fill=(28, 46, 66), width=1)
+    for par in range(-60, 81, 30):
+        pts = _globe_ring([(lon, par) for lon in range(-180, 181, 8)],
+                          lon0, lat0, R - 2, cx, cy)
+        if len(pts) >= 2:
+            d.line(pts, fill=(28, 46, 66), width=1)
+    for feat in _load_world():
+        iso = feat["properties"].get("ADM0_A3", "")
+        is_focus = iso == focus_iso
+        fill = ACCENT if is_focus else (LAND if iso in CORE_ISO else LAND_DIM)
+        for poly in feat["geometry"]["coordinates"]:
+            for ring in poly:
+                pts = _globe_ring(ring, lon0, lat0, R - 2, cx, cy)
+                if len(pts) >= 3:
+                    d.polygon(pts, fill=fill, outline=BORDER)
+    # 焦点标记
+    x, y, c = _globe_project((place["lon"], place["lat"]), lon0, lat0, R - 2, cx, cy)
+    if c > 0.05:
+        d.ellipse([x - 9, y - 9, x + 9, y + 9], fill=ACCENT, outline=(255, 255, 255), width=2)
+        fl = _font(30, True)
+        d.text((x + 16, y - 40), place["name"], font=fl, fill=INK)
+
+
 def _centroid(feat) -> tuple[float, float] | None:
     """最大环的点平均（标签定位用，巴尔干六国紧凑形状够用）。"""
     best, best_n = None, 0
@@ -243,8 +426,11 @@ def _draw_map(img, d, seg, meta) -> None:
     headline = card.get("headline") or "巴尔干动向"
 
     if not map_applicable(headline):
-        # 本条与本图无关（如波罗的海/中亚条目）：整卡退回大字标题卡，
-        # 不画一张没有焦点还带行为者连线的巴尔干图误导观众
+        place = resolve_place(headline, seg.get("narration", ""))
+        if place and _load_world():
+            _draw_map_dynamic(img, d, seg, meta, place)
+            return
+        # 真的没有可定位地名：退回大字卡
         _draw_headline(img, d, seg, meta)
         return
 
@@ -381,6 +567,64 @@ def _draw_outro(img, d, seg, meta) -> None:
         y += 92
 
 
+def _draw_map_dynamic(img, d, seg, meta, place: dict) -> None:
+    """自动定位地图卡：视口对准口播提到的地方——城市/海峡给近景+标记点，
+    国家红色高亮，海/区域给中景。数据缺失时由调用方退大字卡。"""
+    card = seg.get("card", {})
+    headline = card.get("headline") or place["name"]
+    fh = _fit(d, headline, 52, W - 420, bold=True)
+    d.text((200, 185), headline, font=fh, fill=INK)
+    if card.get("sub"):
+        fs = _fit(d, card["sub"], 36, W - 420)
+        d.text((200, 244), card["sub"], font=fs, fill=DIM)
+
+    feats = _load_world()
+    x0, y0, x1, y1 = MAP_BOX
+    mw, mh = x1 - x0, y1 - y0
+    view = _merc_bbox_viewport(place["lon"], place["lat"], place["radius"],
+                               (0, 0, mw, mh))
+    canvas = Image.new("RGB", (mw, mh), SEA)
+    cd = ImageDraw.Draw(canvas)
+    # 仅国家级焦点才整国涂红；城市级只做标记点（否则大国铺满全屏全是红）
+    focus_iso = place.get("iso") if place.get("kind") == "country" else ""
+    for feat in feats:
+        iso = feat["properties"].get("ADM0_A3", "")
+        is_focus = iso == focus_iso
+        fill = ACCENT if is_focus else LAND       # 动态视口统一陆色，海陆对比清晰
+        for poly in feat["geometry"]["coordinates"]:
+            for ring in poly:
+                # 视口预筛：环 bbox 与视口不相交就跳过（大幅省时）
+                lons = [pt[0] for pt in ring]
+                lats = [pt[1] for pt in ring]
+                if (max(lons) < view[0] - 2 or min(lons) > view[2] + 2
+                        or max(lats) < view[1] - 2 or min(lats) > view[3] + 2):
+                    continue
+                pts = [_proj_view(pt, view, (0, 0, mw, mh)) for pt in ring]
+                cd.polygon(pts, fill=fill, outline=(255, 122, 140) if is_focus else BORDER)
+    # 地名标记（城市/海峡/海：红点 + 名称牌）
+    px, py = _proj_view((place["lon"], place["lat"]), view, (0, 0, mw, mh))
+    fl = _font(34, True)
+    tw = cd.textlength(place["name"], font=fl)
+    cd.ellipse([px - 8, py - 8, px + 8, py + 8], fill=ACCENT,
+               outline=(255, 255, 255), width=2)
+    lx = min(max(px + 14, 8), mw - tw - 40)
+    cd.rounded_rectangle([lx, py - 26, lx + tw + 24, py + 22], 8,
+                         fill=BG2, outline=BORDER, width=2)
+    cd.text((lx + 12, py - 20), place["name"], font=fl, fill=INK)
+    img.paste(canvas, (x0, y0))
+    d.rectangle([x0, y0, x1, y1], outline=BORDER, width=2)
+
+    # 右栏：本条要点（来自卡面 lines）
+    fy = 330
+    for ln in (card.get("lines") or [])[:4]:
+        if not ln:
+            continue
+        fline = _fit(d, "· " + ln, 40, 640)
+        d.text((1120, fy), "· " + ln, font=fline, fill=(196, 181, 253))
+        fy += 66
+    d.text((1075, 905), "底图 Natural Earth（公有领域）", font=_font(26), fill=GRAY)
+
+
 _DRAWERS = {"hook": _draw_hook, "headline": _draw_headline, "quote": _draw_quote,
             "map": _draw_map, "china": _draw_china, "mainline": _draw_mainline,
             "outro": _draw_outro}
@@ -391,6 +635,12 @@ def render_cards(pid: str) -> list[dict]:
     script = scriptgen.load_script(pid)
     cards_dir = store.project_dir(pid) / "cards"
     cards_dir.mkdir(exist_ok=True)
+    first_item = next((s for s in script["segments"] if s.get("kind") == "item"), None)
+    hook_place = None
+    if first_item:
+        hook_place = resolve_place(first_item.get("card", {}).get("headline", ""),
+                                   first_item.get("narration", ""))
+    meta = dict(script["meta"], hook_place=hook_place)
     out = []
     for seg in script["segments"]:
         img = Image.new("RGB", (W, H), BG)
@@ -401,7 +651,7 @@ def render_cards(pid: str) -> list[dict]:
         _chrome(img, d, badge=seg.get("card", {}).get("badge", ""),
                 label=script["meta"].get("show_label", ""))
         _DRAWERS.get(seg["card"].get("type", "headline"), _draw_headline)(
-            img, d, seg, script["meta"])
+            img, d, seg, meta)
         png = cards_dir / f"{seg['id']}.png"
         img.save(png)
         out.append({"id": seg["id"], "png": str(png)})
