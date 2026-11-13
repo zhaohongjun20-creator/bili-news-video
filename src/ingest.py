@@ -24,7 +24,12 @@ _PROMPT = """你是新闻简报结构化器。把下面这份地缘快讯简报�
   "items": [
     {{"title": "一句话标题",
       "summary": "事件概述，保留原文的数字与信源表述",
-      "sources": [{{"tier": "官方|主流媒体|区域专家|单方声称待核实", "name": "信源名"}}],
+      "event_time": "事件发生时间（如：11月11日凌晨），原文没有就空串。注意区分报道发布时间与事件发生时间",
+      "sources": [{{"tier": "官方|主流媒体|区域专家|单方声称待核实",
+                    "name": "机构/媒体名",
+                    "url": "原始报道链接，原文没有就空串",
+                    "claim": "该来源支持的具体事实一句话",
+                    "verification": "已核实|交叉印证|待核实"}}],
       "chess": "棋盘角度一句话（原文没有就留空串）",
       "china_link": "对华关联一句话（没有就留空串）",
       "risk": "风险标记（没有就留空串）"}}
@@ -58,12 +63,18 @@ def _rule_parse(md: str) -> dict:
         if is_head:
             cur = {"title": re.sub(r"^[#\d.、\-*\s]+", "", ln)[:60],
                    "summary": "", "sources": [], "chess": "",
-                   "china_link": "", "risk": ""}
+                   "china_link": "", "risk": "", "event_time": ""}
             items.append(cur)
             if badge:
-                cur["sources"].append({"tier": badge.group(1), "name": ln.strip()})
+                cur["sources"].append({"tier": badge.group(1), "name": ln.strip(),
+                                       "url": "", "claim": "", "verification": "待核实"})
         elif cur is not None:
             cur["summary"] = (cur["summary"] + " " + ln.strip()).strip()
+            # 规则降级也抓链接：信源可追溯不依赖 GLM
+            for u in re.findall(r"https?://[^\s）)】。，；、]+", ln):
+                cur["sources"].append({"tier": badge.group(1) if badge else "主流媒体",
+                                       "name": "见链接", "url": u,
+                                       "claim": "", "verification": "待核实"})
             if badge and not any(s["tier"] == badge.group(1) for s in cur["sources"]):
                 cur["sources"].append({"tier": badge.group(1), "name": "见原文"})
         if "主线" in ln and ("：" in ln or ":" in ln):
@@ -120,6 +131,13 @@ def ingest(briefing_md_path, pid_hint_date: str = "", label: str = "") -> tuple[
             obj.setdefault("region", "巴尔干")
             obj.setdefault("mainlines", [])
             obj["nothing_to_report"] = not obj["items"]
+            # 新字段兜底（GLM 漏给就补空，registry 阶段可见）
+            for it in obj["items"]:
+                it.setdefault("event_time", "")
+                for s in it.setdefault("sources", []):
+                    s.setdefault("url", "")
+                    s.setdefault("claim", "")
+                    s.setdefault("verification", "待核实")
             briefing = obj
     mode = "glm"
     if briefing is None:
@@ -135,9 +153,12 @@ def ingest(briefing_md_path, pid_hint_date: str = "", label: str = "") -> tuple[
     briefing["source"] = md_path.name
     briefing["ingest_mode"] = mode
     save_json(briefing, pdir / "briefing.json")
+    from src import sources
+    reg = sources.build_registry(pid)
     store.mark_stage(pid, "ingest",
                      f"{mode} / {len(briefing['items'])} 条 / "
-                     f"{'无事' if briefing.get('nothing_to_report') else '有料'}")
+                     f"{'无事' if briefing.get('nothing_to_report') else '有料'}"
+                     f" / 信源{reg['rows']}条(无链接{reg['no_url']})")
     return pid, briefing
 
 
