@@ -63,15 +63,16 @@ def _intent_path(pid: str) -> Path:
 
 
 def _check_publishing_intent(pid: str, fingerprint: dict) -> None:
-    """投稿中断守卫：上传开始前写 publishing.json；若同指纹 intent 存在且无
-    成功记录，上次上传结果未知（B站可能已收到）→ 人工确认后才允许重试。"""
+    """投稿中断守卫。intent 状态：publishing=在途 / unknown=结果未知。
+    同指纹 intent 存在 → 上传结果未知，禁止自动重试（人工确认后删文件）。"""
     intent = load_json(_intent_path(pid))
     if not intent or intent.get("video") != fingerprint:
         return                                  # 无 intent / 新成片 → 覆盖即可
+    st = intent.get("state", "publishing")
     raise RuntimeError(
-        "检测到未完结的投稿（publishing.json，" + intent.get("started_at", "")
-        + "）：上次上传是否成功未知。请到创作中心确认；若未发出，删除该文件后重试；"
-        "若已发出，切勿重投。")
+        f"检测到未完结的投稿（state={st}，{intent.get('started_at', '')}）："
+        "上次上传结果未知，禁止自动重试。请到创作中心确认；"
+        "若未发出，删除 output/publishing.json 后重试；若已发出，切勿重投。")
 
 
 def _already_published(pid: str) -> str:
@@ -114,23 +115,28 @@ def publish(pid: str) -> dict:
         raise RuntimeError(f"阶段未完成，拒绝投稿：{missing}（先跑 make）")
     if sau_bridge is None:
         raise RuntimeError("bili-autopost-sau 桥接层缺失，无法投稿")
-    fingerprint = _video_fingerprint(rj["final"])
-    _check_publishing_intent(pid, fingerprint)
-    save_json({"video": fingerprint, "started_at": store.now()},
-              _intent_path(pid))
     cfg = load_config()
     pconf = cfg["publish"]
     script = load_json(store.project_dir(pid) / "script.json") or {}
     title = script.get("title") or f"{cfg['show']['name']} {script.get('meta', {}).get('date', '')}"
+    desc = _desc_from_upload_info(pid)          # 上传前可能抛错 → 必须先于 intent
+    tags = publisher.publish_tags(script.get("meta", {}).get("show_label", ""), cfg)
 
+    fingerprint = _video_fingerprint(rj["final"])
+    _check_publishing_intent(pid, fingerprint)
+    save_json({"state": "publishing", "video": fingerprint,
+               "started_at": store.now()}, _intent_path(pid))
     try:
         out = sau_bridge.upload(
-            video_path=rj["final"], title=title, desc=_desc_from_upload_info(pid),
-            tags=publisher.publish_tags(script.get("meta", {}).get("show_label", ""), cfg),
-            tid=int(pconf.get("tid", 228)),
+            video_path=rj["final"], title=title, desc=desc,
+            tags=tags, tid=int(pconf.get("tid", 228)),
             cover=rj.get("cover"), copyright_self=True)
-    except Exception:
-        # intent 保留：上传结果未知 → 待人工确认（防 B站已收、本地无记录后重投）
+    except Exception as e:
+        # 上传后结果未知 → unknown：禁止自动重试，等人工到创作中心确认
+        intent = load_json(_intent_path(pid)) or {}
+        intent["state"] = "unknown"
+        intent["error"] = f"{type(e).__name__}: {e}"[:200]
+        save_json(intent, _intent_path(pid))
         raise
     bvid = ""
     m = re.search(r"(BV[0-9A-Za-z]{10})", out or "")
