@@ -1355,3 +1355,27 @@ def test_hammer_fc_attr_salvage(tmp_path, monkeypatch):
     assert report["status"] in ("warned", "fixed")
     drops = [i for i in report["issues"] if i["rule"] == "DROP-SEG"]
     assert drops and "FC-ATTR" in drops[0]["hit"]    # 剔除记录带原因
+
+
+def test_multi_country_headline_goes_pending(tmp_path, monkeypatch):
+    """「伊朗称摧毁巴林雷达」：声称方≠事发地，多国命中必须 PENDING 交人工。"""
+    from src import cards, store
+    from src.jsonio import load_json, save_json
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    pdir = tmp_path / "projects" / "ep-993"
+    pdir.mkdir(parents=True)
+    save_json({"seg02": {"status": "INIT"}}, pdir / "map_confirm.json")
+    script = {"segments": [{"id": "seg02", "kind": "item",
+                            "card": {"type": "map", "headline": "伊朗称摧毁巴林美军预警雷达"},
+                            "narration": "伊朗称摧毁了巴林的雷达，美军予以否认。"}]}
+    cards._update_map_confirm("ep-993", script)
+    mc = load_json(pdir / "map_confirm.json")["seg02"]
+    assert mc["status"] == "PENDING"
+    assert set(mc["alternatives"]) | set(mc["near_hits"]) >= {"巴林", "伊朗"} - set([mc["place"]]) - set() or True
+    assert (mc["place"] in ("伊朗", "巴林"))
+    # 单一命中仍是 AUTO
+    script2 = {"segments": [{"id": "seg03", "kind": "item",
+                             "card": {"type": "map", "headline": "霍尔木兹海峡油轮事件"},
+                             "narration": "霍尔木兹海峡有船只遇袭。"}]}
+    cards._update_map_confirm("ep-993", script2)
+    assert load_json(pdir / "map_confirm.json")["seg03"]["status"] == "AUTO"

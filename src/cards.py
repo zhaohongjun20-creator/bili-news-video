@@ -256,6 +256,10 @@ GAZETTEER = {
     "特拉维夫": (34.78, 32.08, 2.5, "city", "ISR"),
     "红海": (38.0, 20.5, 10, "sea", None),
     "苏伊士": (32.55, 30.0, 3, "city", "EGY"),
+    "巴林": (50.5, 26.1, 4, "country", "BHR"),
+    "卡塔尔": (51.2, 25.3, 4, "country", "QAT"),
+    "伊斯坦布尔": (28.98, 41.0, 3, "city", "TUR"),
+    "爱德华兹": (-117.9, 34.9, 3, "city", "USA"),
     "黑海": (34.0, 43.5, 8, "sea", None),
     "乌克兰": (31.5, 49.0, 9, "country", "UKR"),
     "基辅": (30.52, 50.45, 3, "city", "UKR"),
@@ -313,15 +317,16 @@ def resolve_place_all(headline: str = "", narration: str = "") -> list[dict]:
 
 
 def resolve_place(headline: str = "", narration: str = "") -> dict | None:
-    """最优定位 + 置信度：与最优解相距 >15° 的其他命中记入 alternatives
-    （同名异地/一事多地的信号，卡面会标「人工确认」）。"""
+    """最优定位 + 置信度：alternatives=相距>15°的其他命中（异地）；
+    near_hits=其余同域命中（一事多国/多地信号，供 PENDING 判定）。"""
     cands = resolve_place_all(headline, narration)
     if not cands:
         return None
     best = cands[0]
     alts = [c["name"] for c in cands[1:]
             if abs(c["lon"] - best["lon"]) > 15 or abs(c["lat"] - best["lat"]) > 15]
-    return {**best, "alternatives": alts}
+    near = [c["name"] for c in cands[1:] if c["name"] not in alts]
+    return {**best, "alternatives": alts, "near_hits": near}
 
 
 def _merc_bbox_viewport(lon: float, lat: float, radius: float,
@@ -748,9 +753,15 @@ def _update_map_confirm(pid: str, script: dict) -> None:
             prev["chosen_resolved"] = bool(chosen and resolve_place(chosen, ""))
             prev.setdefault("place", chosen)
             continue
+        # PENDING 条件：异地候选命中，或同一事命中多个国家（声称方≠事发地，
+        # 如「伊朗称摧毁巴林雷达」——画哪国必须由人定）
+        cands = resolve_place_all(headline, seg.get("narration", ""))
+        n_country = sum(1 for c in cands if c.get("kind") == "country")
+        multi = place.get("alternatives") or n_country >= 2
         mc[seg["id"]] = {"place": place["name"], "via": place.get("via", "标题"),
                          "alternatives": place.get("alternatives", []),
-                         "status": "PENDING" if place.get("alternatives") else "AUTO",
+                         "near_hits": place.get("near_hits", []),
+                         "status": "PENDING" if multi else "AUTO",
                          "updated_at": store.now()}
     save_json(mc, mc_path)
 
