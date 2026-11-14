@@ -56,19 +56,40 @@ def hammer(pid: str) -> dict:
         "\n- RL-SRC: 每条动态口播必须念出信源分级，两种写法任选其一："
         "原样念徽标「【官方】…」，或口播化「信源级别为官方」"
         "\n- RL-CHINA: 涉华段必须含官方口径锚点句，如「中国外交部此前表示」"
-        "「中国驻塞尔维亚使馆称」")
+        "「中国驻塞尔维亚使馆称」"
+        "\n- FC-ATTR: 简报中「X称Y」的内容在口播出现时，同一句必须保留归属动词"
+        "（称/表示/宣布/指出…）——单方声明不得写成既定事实"
+        "\n- FC-HEDGE: 含待核实信源的条目必须念出「尚待核实」等对冲表述")
 
+    from src import factcheck
     all_issues: list[dict] = []
     repaired = False
     manual = script.get("meta", {}).get("mode") == "manual"
-    for attempt in range(2):
+
+    def _round_issues(scr: dict) -> tuple[dict[str, list], list[dict]]:
+        """一轮完整检查：红线逐段 + 事实核验（同轮参与修复与剔除）。"""
         flagged: dict[str, list] = {}
-        all_issues = []
-        for seg in script["segments"]:
+        issues: list[dict] = []
+        for seg in scr["segments"]:
             iss = _check_segment(seg, item_sources, manual=manual)
             if iss:
                 flagged[seg["id"]] = iss
-                all_issues.extend([dict(i, seg=seg["id"]) for i in iss])
+                issues.extend([dict(i, seg=seg["id"]) for i in iss])
+        fc: list[dict] = []
+        if brief.get("items"):
+            fc = (factcheck.check_script(brief, scr)
+                  + factcheck.check_attribution(brief, scr)
+                  + factcheck.check_entities(brief, scr))
+        if manual:
+            fc += factcheck.check_manual_sources(scr)
+        for i in fc:
+            sid = i.get("seg", "")
+            flagged.setdefault(sid, []).append(i)
+            issues.append(dict(i, seg=sid))
+        return flagged, issues
+
+    for attempt in range(2):
+        flagged, all_issues = _round_issues(script)
         if not flagged:
             break
         block_hits = [i for i in all_issues if i["level"] == "block"]
@@ -91,25 +112,28 @@ def hammer(pid: str) -> dict:
                 repaired = True
                 continue
         # 模板稿或重写失败：按「宁缺毋滥」剔除——条目段剔除；
-        # china/mainline 是辅助段，命中也剔除而不是毙整期
-        bad_ids = {s["id"] for s in script["segments"]
-                   if flagged.get(s["id"])
-                   and s.get("kind") in ("item", "china", "mainline")}
+        # china/mainline 是辅助段，命中也剔除而不是毙整期。
+        # 人工稿例外：不修改人工稿原文，命中 BLOCK 直接拒稿交人工改稿
+        bad_ids = set()
+        if not manual:
+            bad_ids = {s["id"] for s in script["segments"]
+                       if flagged.get(s["id"])
+                       and s.get("kind") in ("item", "china", "mainline")}
         dropped_refs = sorted({seg.get("item_ref") for seg in script["segments"]
                                if seg["id"] in bad_ids
                                and seg.get("kind") == "item"})
         dropped_aux = sorted({seg["kind"] for seg in script["segments"]
                               if seg["id"] in bad_ids
                               and seg.get("kind") in ("china", "mainline")})
+        reasons = sorted({i["rule"] for sid in bad_ids
+                          for i in flagged.get(sid, [])})
         script["segments"] = [s for s in script["segments"] if s["id"] not in bad_ids]
         drops = {"rule": "DROP-SEG", "level": "info",
-                 "hit": f"剔除条目 {dropped_refs} / 辅助段 {dropped_aux}"}
-        # 关键：剔除后对剩余段落重判，丢掉已剔除段落的旧 issue——
-        # 否则残留的 block 会把本可发布的稿子误判成拒稿
-        all_issues = [drops]                        # 保留剔除记录供审计
-        for seg in script["segments"]:
-            for i in _check_segment(seg, item_sources):
-                all_issues.append(dict(i, seg=seg["id"]))
+                 "hit": f"剔除条目 {dropped_refs} / 辅助段 {dropped_aux}"
+                        f" / 原因 {reasons}"}
+        # 关键：剔除后对剩余段落整轮重判（红线+事实核验），丢掉已剔除段落的旧 issue
+        flagged2, fc_issues = _round_issues(script)
+        all_issues = [drops] + [dict(i, seg=i.get("seg", "")) for i in fc_issues]
         break
 
     # hook 条数口径：GLM 偶发把条数念错（如 6 条念成 5 条），最小替换修正
@@ -121,16 +145,6 @@ def hammer(pid: str) -> dict:
             hook["narration"] = fixed
             all_issues.append({"rule": "RL-COUNT", "level": "info",
                                "hit": note, "seg": hook.get("id", "seg01")})
-
-    # 事实一致性核验（数字/日期须见于简报、待核实须对冲、声明保真、新实体）。
-    # 人工稿没有简报基线 → 跳过数字/日期比对，改走来源可追溯检查（RL-SRC-M）
-    from src import factcheck
-    if brief.get("items"):
-        all_issues.extend(factcheck.check_script(brief, script))
-        all_issues.extend(factcheck.check_attribution(brief, script))
-        all_issues.extend(factcheck.check_entities(brief, script))
-    if manual:
-        all_issues.extend(factcheck.check_manual_sources(script))
 
     n_items_left = sum(1 for s in script["segments"] if s.get("kind") == "item")
     status = "ok"

@@ -1110,9 +1110,14 @@ def test_hammer_manual_blocks_unsourced(tmp_path, monkeypatch):
                     "card": {"headline": "x"}, "item_ref": 0}],
                "warnings": []}, pdir / "script.json")
     from src import hammer
+    from src.jsonio import load_json
     report = hammer.hammer("ep-996")
+    # 人工稿命中 BLOCK：拒稿且原文保留（第六轮「不修改人工稿原文」）
+    assert report["status"] == "rejected"
     assert any(i["rule"] == "RL-SRC-M" and i["level"] == "block"
                for i in report["issues"])
+    scr = load_json(pdir / "script.json")
+    assert any(s["id"] == "seg02" for s in scr["segments"])  # 未被剔除
 
 
 def test_map_confirm_gate(tmp_path, monkeypatch):
@@ -1313,3 +1318,40 @@ def test_detector_failure_is_fail_not_pass(tmp_path, monkeypatch):
         returncode=1, stdout="", stderr="filter unavailable"))
     probs = qc.detector_problems("whatever.mp4")
     assert any("检测运行失败" in p for p in probs)
+
+
+def test_hammer_fc_attr_salvage(tmp_path, monkeypatch):
+    """AI 稿声明丢归属动词 → 该条剔除，其余条目存活，剔除记录含原因。"""
+    from src import hammer, store
+    from src.jsonio import save_json
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    pdir = tmp_path / "projects" / "ep-994"
+    pdir.mkdir(parents=True)
+    save_json({"pid": "ep-994", "stages": {}}, pdir / "manifest.json")
+    save_json({"date": "2026-11-13", "region": "t",
+               "items": [
+                {"title": "甲", "summary": "雷扎伊表示，在美方回应前不会重开海峡。",
+                 "sources": [{"tier": "官方", "name": "X"}], "chess": "",
+                 "china_link": "", "risk": ""},
+                {"title": "乙", "summary": "港区内多处设施起火，约5座储罐受损。",
+                 "sources": [{"tier": "官方", "name": "Y"}], "chess": "",
+                 "china_link": "", "risk": ""}],
+               "mainlines": [], "excluded_refs": []}, pdir / "briefing.json")
+    save_json({"title": "t", "meta": {"mode": "glm", "date": "2026-11-13"},
+               "segments": [
+                {"id": "seg01", "kind": "hook",
+                 "narration": "开场钩子，今天两件事。", "card": {}, "item_ref": 0},
+                {"id": "seg02", "kind": "item", "item_ref": 1,
+                 "narration": "在美方回应前不会重开海峡。信源级别【官方】。",
+                 "card": {"headline": "甲"}},
+                {"id": "seg03", "kind": "item", "item_ref": 2,
+                 "narration": "港区内多处设施起火，约5座储罐受损。信源级别【官方】。",
+                 "card": {"headline": "乙"}},
+                {"id": "seg04", "kind": "outro",
+                 "narration": "不站队不预测，下期再见。", "card": {}, "item_ref": 0}],
+               "warnings": []}, pdir / "script.json")
+    report = hammer.hammer("ep-994")
+    assert report["items_left"] == 1                 # 违规条目被剔除
+    assert report["status"] in ("warned", "fixed")
+    drops = [i for i in report["issues"] if i["rule"] == "DROP-SEG"]
+    assert drops and "FC-ATTR" in drops[0]["hit"]    # 剔除记录带原因
