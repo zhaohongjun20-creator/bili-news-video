@@ -596,8 +596,7 @@ def _draw_mainline(img, d, seg, meta) -> None:
 def _draw_outro(img, d, seg, meta) -> None:
     name = meta.get("show_label") or load_config()["show"]["name"]
     d.text((W // 2 - len(name) * 55, 380), name, font=_font(110, True), fill=INK)
-    lines = ["只讲发生了什么、各方怎么说", "不站队 · 不评论 · 不预测",
-             "下期见"]
+    lines = ["下期见"]
     y = 580
     for ln in lines:
         f = _font(48)

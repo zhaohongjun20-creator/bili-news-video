@@ -32,7 +32,7 @@ _PROMPT = """你是中文军事地缘快讯栏目的主编。栏目「{show}」�
   不能合并。每段：发生了什么(2句) + 信源分级念出来 + 各方说法/棋盘含义(2句)
 - 若任一条的 china_link 非空：恰好 1 段涉华关联（kind=china，官方口径锚定）
 - 若 mainlines 非空：恰好 1 段主线追踪（kind=mainline，多条主线并成一句）
-- outro：收尾（"不站队不预测"+下期见），恰好 1 段
+- outro：收尾（简短道别+下期见，不加任何立场表态），恰好 1 段
 
 卡片字段：item 段的 card.headline 必须是本条标题的压缩（≤18字）；
 map 卡用于普通条目、quote 卡仅用于「待核实」条目。
@@ -130,8 +130,7 @@ def _template_script(brief: dict, cfg: dict) -> dict:
                      "item_ref": 0, "card": _card("mainline", None)})
         segs[-1]["card"]["lines"] = [m[:30] for m in brief["mainlines"][:4]]
     segs.append({"kind": "outro",
-                 "narration": ("以上是本期" + show + "。只讲发生了什么、各方怎么说；"
-                               "不站队，不预测。数据口径以信源原文为准，我们下期见。"),
+                 "narration": f"以上是本期{show}，我们下期见。",
                  "item_ref": 0, "card": _card("outro", None)})
     title = f"{show} {d.year}年{d.month}月{d.day}日"
     return {"title": title, "segments": segs,
