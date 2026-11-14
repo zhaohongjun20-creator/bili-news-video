@@ -70,16 +70,17 @@ def qc(pid: str) -> dict:
     if not ffmpeg.has_audio_stream(final):
         problems.append("无音轨：成片缺音频流（配音混流失败？）")
 
-    # 黑屏/冻结/静音（ffmpeg 原生检测器，阈值保守：黑屏>2s、冻结>4s、静音>6s）
+    # 黑屏/静音（ffmpeg 原生检测器）。冻结仅拦病态全冻结（>25s）——
+    # 卡面「卡住不推镜」是有意设计，短时静止不算缺陷
     det = ffmpeg.run([ffmpeg.ffmpeg_exe(), "-i", str(final), "-vf",
-                      "blackdetect=d=1.5:pix_th=0.10,freezedetect=d=4",
+                      "blackdetect=d=1.5:pix_th=0.10,freezedetect=d=25",
                       "-an", "-f", "null", "-"], timeout=900)
     for start, dur in ffmpeg.parse_blackdetect(det.stderr or ""):
         if dur > 2.0:
             problems.append(f"黑屏 {dur:.1f}s @ {start:.0f}s")
     for start, dur in ffmpeg.parse_freezedetect(det.stderr or ""):
-        if dur > 4.0:
-            problems.append(f"冻结画面 {dur:.1f}s @ {start:.0f}s")
+        if dur > 25.0:
+            problems.append(f"病态冻结 {dur:.1f}s @ {start:.0f}s（整段无任何动效？）")
     det2 = ffmpeg.run([ffmpeg.ffmpeg_exe(), "-i", str(final), "-af",
                        "silencedetect=noise=-50dB:d=6",
                        "-f", "null", "-"], timeout=900)

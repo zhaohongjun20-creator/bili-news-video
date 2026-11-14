@@ -606,6 +606,19 @@ def _draw_outro(img, d, seg, meta) -> None:
         y += 92
 
 
+def _label_rect(px: float, py: float, text_w: float, mw: float, mh: float,
+                pad: float = 12) -> tuple[float, float, float, float]:
+    """纯函数：标记名牌位置。默认在标记点右侧；贴右缘翻到左侧；
+    上下夹紧画布内。返回 (lx, ly, lw, lh)。"""
+    lw, lh = text_w + 24, 48
+    lx = px + pad
+    if lx + lw > mw - 8:
+        lx = px - pad - lw                      # 翻到标记点左侧
+    lx = max(8.0, min(lx, mw - lw - 8))
+    ly = max(6.0, min(py - lh / 2, mh - lh - 6))
+    return lx, ly, lw, lh
+
+
 def _draw_map_dynamic(img, d, seg, meta, place: dict) -> None:
     """自动定位地图卡：视口对准口播提到的地方——城市/海峡给近景+标记点，
     国家红色高亮，海/区域给中景。数据缺失时由调用方退大字卡。"""
@@ -640,16 +653,25 @@ def _draw_map_dynamic(img, d, seg, meta, place: dict) -> None:
                     continue
                 pts = [_proj_view(pt, view, (0, 0, mw, mh)) for pt in ring]
                 cd.polygon(pts, fill=fill, outline=(255, 122, 140) if is_focus else BORDER)
-    # 地名标记（城市/海峡/海：红点 + 名称牌）
+    # 定位依据 + 置信度提示（先算，标记牌要避开这个区域）；宽度超框自动缩字号
+    tag = f"定位：{place['name']}（{place.get('via', '标题')}）"
+    if place.get("alternatives"):
+        tag += " · 另命中 " + "、".join(place["alternatives"][:2]) + "，人工确认"
+    ftag = _fit(d, tag, 26, (x1 - x0) - 28)
+    tag_right = 14 + d.textlength(tag, font=ftag)
+    # 地名标记（城市/海峡/海：红点 + 名称牌；位置由 _label_rect 防越界）
     px, py = _proj_view((place["lon"], place["lat"]), view, (0, 0, mw, mh))
     fl = _font(34, True)
     tw = cd.textlength(place["name"], font=fl)
     cd.ellipse([px - 8, py - 8, px + 8, py + 8], fill=ACCENT,
                outline=(255, 255, 255), width=2)
-    lx = min(max(px + 14, 8), mw - tw - 40)
-    cd.rounded_rectangle([lx, py - 26, lx + tw + 24, py + 22], 8,
+    lx, ly, lw, lh = _label_rect(px, py, tw, mw, mh)
+    # 避开左上角定位依据标签区
+    if ly < 60 and lx < tag_right + 12:
+        ly = min(mh - lh - 6, 60)
+    cd.rounded_rectangle([lx, ly, lx + lw, ly + lh], 8,
                          fill=BG2, outline=BORDER, width=2)
-    cd.text((lx + 12, py - 20), place["name"], font=fl, fill=INK)
+    cd.text((lx + 12, ly + 11), place["name"], font=fl, fill=INK)
     img.paste(canvas, (x0, y0))
     d.rectangle([x0, y0, x1, y1], outline=BORDER, width=2)
 
@@ -662,11 +684,7 @@ def _draw_map_dynamic(img, d, seg, meta, place: dict) -> None:
         d.text((1120, fy), "· " + ln, font=fline, fill=(196, 181, 253))
         fy += 66
     d.text((1075, 905), "底图 Natural Earth（公有领域）", font=_font(26), fill=GRAY)
-    # 定位依据 + 置信度提示（地图画错比没有地图更糟）
-    tag = f"定位：{place['name']}（{place.get('via', '标题')}）"
-    if place.get("alternatives"):
-        tag += " · 另命中 " + "、".join(place["alternatives"][:2]) + "，人工确认"
-    d.text((x0 + 14, y0 + 12), tag, font=_font(26), fill=DIM)
+    d.text((x0 + 14, y0 + 12), tag, font=ftag, fill=DIM)   # 定位依据（宽度已适配）
     return ((x0 + px) / W, (y0 + py) / H)     # 焦点比例：渲染时 zoompan 推向此点
 
 

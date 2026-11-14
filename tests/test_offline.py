@@ -1272,3 +1272,14 @@ def test_detector_parsers():
     assert ffmpeg.parse_silencedetect(
         "silence_start: 0\nsilence_end: 8 | silence_duration: 8") == [(0.0, 8.0)]
     assert ffmpeg.parse_blackdetect("no events") == []
+
+
+def test_map_label_rect_bounds():
+    """标记名牌：贴右缘翻左侧、靠上夹紧、常规居右。"""
+    from src import cards
+    lx, ly, lw, lh = cards._label_rect(1800, 300, 200, 1920, 1080)
+    assert lx + lw <= 1920 - 8 and lx < 1800        # 翻到标记点左侧
+    lx2, ly2, _, _ = cards._label_rect(500, 10, 200, 1920, 1080)
+    assert ly2 >= 6 and ly2 <= 1080 - 54
+    lx3, _, _, _ = cards._label_rect(500, 540, 200, 1920, 1080)
+    assert lx3 == 512
