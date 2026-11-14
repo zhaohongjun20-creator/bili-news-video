@@ -61,11 +61,17 @@ def main() -> int:
     print(f"[6/7] qc: PASS / {report['duration']:.1f}s")
 
     pr = production_report.build(pid)
+    # draft 状态的演示项目：结论必须不可发布、审片状态必须如实标注
+    assert pr["verdict"] == "不可发布", pr["verdict"]
+    assert pr["review_status"] == "draft", pr["review_status"]
     assert not pr["blockers"], f"报告阻断项: {pr['blockers']}"
-    review_st = (store.project_dir(pid) / "review.json")
+    assert any(c["check"] == "视频规格/QC" and c["status"] == "PASS"
+               for c in pr["checks"])
+    assert (ROOT / "briefings" / "sample-示例简报-演示数据.md"
+            ).read_text(encoding="utf-8").find("勿直接发布") != -1
     from src import review as review_mod
-    from src.jsonio import load_json
     review_mod.reject(pid, "回归测试产物：演示数据，禁止投稿")
+    assert review_mod.status(pid) == "rejected"       # 演示项目必须不可投稿
     print(f"[7/7] report: {pr['verdict']}（审片 {pr['review_status']}，已自动退稿防误投）")
 
     final = store.project_dir(pid) / "output" / "final.mp4"

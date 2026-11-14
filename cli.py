@@ -131,7 +131,7 @@ def cmd_reject(a) -> None:
 
 def cmd_map_confirm(a) -> None:
     """人工确认地图定位（PENDING → CONFIRMED），解除发布闸门。"""
-    from src.jsonio import load_json
+    from src.jsonio import load_json, save_json
     pdir = store.project_dir(a.pid)
     mc = load_json(pdir / "map_confirm.json") or {}
     if a.seg not in mc:

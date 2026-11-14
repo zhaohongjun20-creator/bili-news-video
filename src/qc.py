@@ -43,6 +43,35 @@ def check_spec(spec: dict, vcfg: dict) -> list[str]:
     return problems
 
 
+def detector_problems(final) -> list[str]:
+    """黑屏/冻结/静音检测（ffmpeg 原生检测器）。检测命令本身失败 ≠ 无异常：
+    非零退出直接判 FAIL 并带错误信息，杜绝「没跑成 = 没问题」的假象。"""
+    problems: list[str] = []
+    det = ffmpeg.run([ffmpeg.ffmpeg_exe(), "-i", str(final), "-vf",
+                      "blackdetect=d=1.5:pix_th=0.10,freezedetect=d=25",
+                      "-an", "-f", "null", "-"], timeout=900)
+    if det.returncode != 0:
+        return [f"黑屏/冻结检测运行失败(rc={det.returncode})："
+                f"{(det.stderr or '')[-120:]}"]
+    for start, dur in ffmpeg.parse_blackdetect(det.stderr or ""):
+        if dur > 2.0:
+            problems.append(f"黑屏 {dur:.1f}s @ {start:.0f}s")
+    for start, dur in ffmpeg.parse_freezedetect(det.stderr or ""):
+        if dur > 25.0:
+            problems.append(f"病态冻结 {dur:.1f}s @ {start:.0f}s（整段无任何动效？）")
+    det2 = ffmpeg.run([ffmpeg.ffmpeg_exe(), "-i", str(final), "-af",
+                       "silencedetect=noise=-50dB:d=6",
+                       "-f", "null", "-"], timeout=900)
+    if det2.returncode != 0:
+        problems.append(f"静音检测运行失败(rc={det2.returncode})："
+                        f"{(det2.stderr or '')[-120:]}")
+    else:
+        for start, dur in ffmpeg.parse_silencedetect(det2.stderr or ""):
+            if dur > 6.0:
+                problems.append(f"异常静音 {dur:.1f}s @ {start:.0f}s")
+    return problems
+
+
 def qc(pid: str) -> dict:
     from src.jsonio import load_json
     cfg = load_config()
@@ -70,23 +99,8 @@ def qc(pid: str) -> dict:
     if not ffmpeg.has_audio_stream(final):
         problems.append("无音轨：成片缺音频流（配音混流失败？）")
 
-    # 黑屏/静音（ffmpeg 原生检测器）。冻结仅拦病态全冻结（>25s）——
-    # 卡面「卡住不推镜」是有意设计，短时静止不算缺陷
-    det = ffmpeg.run([ffmpeg.ffmpeg_exe(), "-i", str(final), "-vf",
-                      "blackdetect=d=1.5:pix_th=0.10,freezedetect=d=25",
-                      "-an", "-f", "null", "-"], timeout=900)
-    for start, dur in ffmpeg.parse_blackdetect(det.stderr or ""):
-        if dur > 2.0:
-            problems.append(f"黑屏 {dur:.1f}s @ {start:.0f}s")
-    for start, dur in ffmpeg.parse_freezedetect(det.stderr or ""):
-        if dur > 25.0:
-            problems.append(f"病态冻结 {dur:.1f}s @ {start:.0f}s（整段无任何动效？）")
-    det2 = ffmpeg.run([ffmpeg.ffmpeg_exe(), "-i", str(final), "-af",
-                       "silencedetect=noise=-50dB:d=6",
-                       "-f", "null", "-"], timeout=900)
-    for start, dur in ffmpeg.parse_silencedetect(det2.stderr or ""):
-        if dur > 6.0:
-            problems.append(f"异常静音 {dur:.1f}s @ {start:.0f}s")
+    # 黑屏/冻结/静音（ffmpeg 原生检测器；检测失败 ≠ 无异常）
+    problems += detector_problems(final)
 
     # 语速启发式：音频时长 vs 文案字数（约4.5字/秒 ±45%容差）。
     # 抓「字幕是A内容、音频是B内容」的缓存错配——规格指标查不出这种错。

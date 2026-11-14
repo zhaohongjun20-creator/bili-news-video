@@ -1283,3 +1283,33 @@ def test_map_label_rect_bounds():
     assert ly2 >= 6 and ly2 <= 1080 - 54
     lx3, _, _, _ = cards._label_rect(500, 540, 200, 1920, 1080)
     assert lx3 == 512
+
+
+# ---- 第七轮:map-confirm CLI / 检测器失败拦截 ----------------------------
+def test_map_confirm_cli_writes_and_invalidates(tmp_path, monkeypatch):
+    """CLI 层：确认写入 chosen + 作废旧渲染 + 审片回 draft（回归 NameError 缺陷）。"""
+    import argparse
+    import cli
+    from src import review, store
+    from src.jsonio import load_json, save_json
+    _fake_release(tmp_path, monkeypatch)
+    pdir = tmp_path / "projects" / "ep-999"
+    save_json({"seg02": {"place": "乌斯季卢加", "status": "PENDING",
+                         "alternatives": ["芬兰湾"]}}, pdir / "map_confirm.json")
+    cli.cmd_map_confirm(argparse.Namespace(pid="ep-999", seg="seg02",
+                                           place="芬兰湾"))
+    mc = load_json(pdir / "map_confirm.json")
+    assert mc["seg02"]["status"] == "CONFIRMED" and mc["seg02"]["chosen"] == "芬兰湾"
+    m = store.manifest("ep-999")
+    assert "render" not in m["stages"] and "qc" not in m["stages"]  # 旧渲染作废
+    assert review.status("ep-999") == "draft"                       # 回草稿重审
+
+
+def test_detector_failure_is_fail_not_pass(tmp_path, monkeypatch):
+    """检测命令非零退出 → 显式 FAIL，不得当成「无异常」。"""
+    import types
+    from src import ffmpeg, qc
+    monkeypatch.setattr(ffmpeg, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=1, stdout="", stderr="filter unavailable"))
+    probs = qc.detector_problems("whatever.mp4")
+    assert any("检测运行失败" in p for p in probs)
