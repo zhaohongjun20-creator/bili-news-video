@@ -123,6 +123,7 @@ class ShotList:
                 "start": span[0],
                 "end": span[1],
                 "kind": "hook" if "钩子" in fields.get("镜类", "") else "item",
+                "picture": fields.get("画面类型", "").strip(),
                 "cues": cues,
                 "locked": locked,
             })
@@ -229,7 +230,6 @@ class ShotList:
         segments = []
         for i, shot in enumerate(shots, 1):
             cues = shot["cues"]
-            full = ShotList.card_lines(cues, shot.get("locked", ""))
             segments.append({
                 "id": f"seg{i:02d}",
                 "kind": shot["kind"],
@@ -237,13 +237,7 @@ class ShotList:
                 "program_start": shot["start"],
                 "program_end": shot["end"],
                 "cues": cues,
-                "card": {
-                    "type": "headline",
-                    "headline": cues[0]["text"],
-                    "sub": "",
-                    "lines": full[1:],
-                    "full": full,
-                },
+                "card": ShotList._card_for(shot, cues),
             })
         out = dict(script)
         out["meta"] = meta
@@ -253,11 +247,51 @@ class ShotList:
         return out
 
     @staticmethod
+    def _card_for(shot: dict, cues: list[dict]) -> dict:
+        """数据卡仍是大字。地图卡交给底图，不把「印太范围示意」印成正文。"""
+        if shot.get("picture") != "地图卡":
+            full = ShotList.card_lines(cues, shot.get("locked", ""))
+            return {
+                "type": "headline",
+                "headline": cues[0]["text"],
+                "sub": "",
+                "lines": full[1:],
+                "full": full,
+            }
+        locked = shot.get("locked") or ""
+        title = next((c["text"] for c in cues if "印太海上监视合作" in c["text"]),
+                     cues[0]["text"])
+        if "印太海上监视合作" in title and title != "印太海上监视合作":
+            title = "印太海上监视合作"
+        lines = [c["text"] for c in cues if "稿件写明" in c["text"] or "定于" in c["text"]]
+        if "P-8" in locked and not any("P-8" in ln for ln in lines):
+            lines.append("P-8、P-3C")
+        phases = []
+        if len(cues) >= 2:
+            phases = [
+                {"phase": "name",
+                 "length": round(cues[0]["end"] - cues[0]["start"], 3)},
+                {"phase": "exercise",
+                 "length": round(cues[-1]["end"] - cues[1]["start"], 3)},
+            ]
+        card = {
+            "type": "map",
+            "extent": "印太" if "印太范围" in locked else "",
+            "headline": title,
+            "sub": "",
+            "lines": lines,
+            "source": "联合新闻稿" if "联合新闻稿" in locked else "",
+        }
+        if phases:
+            card["phases"] = phases
+        return card
+
+    @staticmethod
     def bind_episode(pid: str) -> bool:
         """分镜清单每镜都有字幕拍时，用它替换口播、卡片和封面文案。
 
         清单没过许可门、或有镜没有分时字幕，则什么都不改。
-        文案变了就丢掉旧配音、字幕和卡片，并让锤稿之后的阶段重跑。
+        口播变了就丢掉配音并重跑锤稿。只改卡面时保留原配音，只重出画面。
         """
         from src import scriptgen, store
         path = store.project_dir(pid) / ShotList.FILENAME
@@ -277,8 +311,12 @@ class ShotList:
             return False
         from src.jsonio import save_json
         save_json(new, store.project_dir(pid) / "script.json")
-        ShotList._drop_stale_media(pid)
-        store.redo_stage(pid, "hammer")
+        if ShotList._spoken_same(script, new):
+            ShotList._drop_pictures(pid)
+            store.redo_stage(pid, "render")
+        else:
+            ShotList._drop_stale_media(pid)
+            store.redo_stage(pid, "hammer")
         return True
 
     @staticmethod
@@ -299,7 +337,29 @@ class ShotList:
                 return False
             if list(a.get("cues") or []) != list(b.get("cues") or []):
                 return False
-            if (a.get("card") or {}).get("full") != (b.get("card") or {}).get("full"):
+            if (a.get("card") or {}) != (b.get("card") or {}):
+                return False
+            for key in ("program_start", "program_end"):
+                if a.get(key) != b.get(key):
+                    return False
+        return True
+
+    @staticmethod
+    def _spoken_same(old: dict, new: dict) -> bool:
+        """口播、时码、封面文案没变。卡面可以不同。"""
+        if (old.get("title") or "") != (new.get("title") or ""):
+            return False
+        om, nm = old.get("meta") or {}, new.get("meta") or {}
+        for key in ("cover_title", "cover_sub", "expected_s"):
+            if om.get(key) != nm.get(key):
+                return False
+        osegs, nsegs = old.get("segments") or [], new.get("segments") or []
+        if len(osegs) != len(nsegs):
+            return False
+        for a, b in zip(osegs, nsegs):
+            if a.get("narration") != b.get("narration") or a.get("kind") != b.get("kind"):
+                return False
+            if list(a.get("cues") or []) != list(b.get("cues") or []):
                 return False
             for key in ("program_start", "program_end"):
                 if a.get(key) != b.get(key):
@@ -324,6 +384,26 @@ class ShotList:
                 (out / name).unlink(missing_ok=True)
         for name in ("voice.json", "timeline.json", "cards.json"):
             (pdir / name).unlink(missing_ok=True)
+
+    @staticmethod
+    def _drop_pictures(pid: str) -> None:
+        """只丢掉画面。配音文件和 voice.json 留着。"""
+        from src import store
+        pdir = store.project_dir(pid)
+        for name in ("cards", "clips"):
+            folder = pdir / name
+            if not folder.is_dir():
+                continue
+            for f in folder.iterdir():
+                if f.is_file():
+                    f.unlink()
+        out = pdir / "output"
+        if out.is_dir():
+            for name in ("subs.ass", "final.mp4", "cover.jpg", "render.json",
+                         "qc_report.json", "_silent.mp4"):
+                (out / name).unlink(missing_ok=True)
+        (pdir / "cards.json").unlink(missing_ok=True)
+        (pdir / "timeline.json").unlink(missing_ok=True)
 
     @staticmethod
     def _iter_shots(text: str) -> list[tuple[dict, str]]:

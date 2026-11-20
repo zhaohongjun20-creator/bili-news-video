@@ -510,9 +510,62 @@ def _confirmed_place(pid: str, seg_id: str) -> tuple[dict | None, dict | None]:
     return resolve_place(chosen, ""), rec
 
 
+class IndoPacificMap:
+    """印太范围示意。陆海来自已入库的 Natural Earth 50m，不标海域名。"""
+
+    VIEW = (25.0, -48.0, 175.0, 48.0)   # 印度洋到西太平洋，不跨日界线
+
+    @staticmethod
+    def paint(img, box: tuple) -> None:
+        """把国界画进 box。先画在画布上再贴回，越界的陆地不会盖住标题。"""
+        x0, y0, x1, y1 = box
+        mw, mh = x1 - x0, y1 - y0
+        canvas = Image.new("RGB", (mw, mh), SEA)
+        draw = ImageDraw.Draw(canvas)
+        view = IndoPacificMap.VIEW
+        inner = (0, 0, mw, mh)
+        for feat in _load_world():
+            for poly in feat["geometry"]["coordinates"]:
+                for ring in poly:
+                    lons = [pt[0] for pt in ring]
+                    lats = [pt[1] for pt in ring]
+                    if max(lons) - min(lons) > 180:
+                        continue
+                    if (max(lons) < view[0] or min(lons) > view[2]
+                            or max(lats) < view[1] or min(lats) > view[3]):
+                        continue
+                    pts = [_proj_view(pt, view, inner) for pt in ring]
+                    draw.polygon(pts, fill=LAND, outline=BORDER)
+        img.paste(canvas, (x0, y0))
+
+    @staticmethod
+    def draw(img, d, seg, meta) -> None:
+        """地图卡：底图加合作名称；后一拍才加演习安排，用语沿用字幕。"""
+        card = seg.get("card", {})
+        phase = card.get("phase") or "name"
+        title = card.get("headline") or "印太海上监视合作"
+        d.text((140, 200), title, font=_fit(d, title, 56, 1500, bold=True), fill=INK)
+        text_w = 560 if phase == "exercise" else 0
+        box = (100, 300, W - 100 - text_w, H - 80)
+        IndoPacificMap.paint(img, box)
+        d.rectangle(list(box), outline=BORDER, width=2)
+        credit = "Made with Natural Earth"
+        d.text((box[0] + 16, box[3] - 40), credit, font=_font(26), fill=DIM)
+        if phase != "exercise":
+            return
+        lines = [ln for ln in (card.get("lines") or []) if ln]
+        if card.get("source"):
+            lines = lines + [card["source"]]
+        _draw_block(d, lines, box[2] + 28, 320, text_w - 48, 620, 36, INK,
+                    bold=True, min_size=22)
+
+
 def _draw_map(img, d, seg, meta) -> None:
     """真实底图卡：Natural Earth 50m 国界，焦点国家红色高亮，外围行为者
     右栏标签+细线指向焦点。数据缺失时退回棋盘格示意卡（老版）。"""
+    if seg.get("card", {}).get("extent") == "印太":
+        IndoPacificMap.draw(img, d, seg, meta)
+        return
     feats = _load_geo()
     card = seg.get("card", {})
     headline = card.get("headline") or "巴尔干动向"
@@ -766,18 +819,31 @@ def render_cards(pid: str) -> list[dict]:
                            if first_item else ""))
     out = []
     for seg in script["segments"]:
-        img = Image.new("RGB", (W, H), BG)
-        d = ImageDraw.Draw(img)
-        # 每张卡一层淡面板底（四周 80px 边框感），避免纯背景太空
-        d.rounded_rectangle([80, 180, W - 80, H - 80], 24, fill=BG2)
-        img.paste(Image.new("RGB", (W - 320, H - 420), BG), (160, 260))
-        _chrome(img, d, badge=seg.get("card", {}).get("badge", ""),
-                label=script["meta"].get("show_label", ""))
-        ret = _DRAWERS.get(seg["card"].get("type", "headline"), _draw_headline)(
-            img, d, seg, meta)
-        png = cards_dir / f"{seg['id']}.png"
-        img.save(png)
-        entry = {"id": seg["id"], "png": str(png)}
+        phases = seg.get("card", {}).get("phases") or [None]
+        spans = []
+        entry_png = None
+        ret = None
+        for i, ph in enumerate(phases):
+            img = Image.new("RGB", (W, H), BG)
+            d = ImageDraw.Draw(img)
+            # 每张卡一层淡面板底（四周 80px 边框感），避免纯背景太空
+            d.rounded_rectangle([80, 180, W - 80, H - 80], 24, fill=BG2)
+            img.paste(Image.new("RGB", (W - 320, H - 420), BG), (160, 260))
+            _chrome(img, d, badge=seg.get("card", {}).get("badge", ""),
+                    label=script["meta"].get("show_label", ""))
+            drawn = seg
+            if ph:
+                drawn = {**seg, "card": {**seg["card"], "phase": ph["phase"]}}
+            ret = _DRAWERS.get(seg["card"].get("type", "headline"), _draw_headline)(
+                img, d, drawn, meta)
+            png = cards_dir / (f"{seg['id']}.png" if not ph else f"{seg['id']}-p{i}.png")
+            img.save(png)
+            entry_png = entry_png or png
+            if ph:
+                spans.append({"png": str(png), "length": ph["length"]})
+        entry = {"id": seg["id"], "png": str(entry_png)}
+        if spans:
+            entry["spans"] = spans
         if isinstance(ret, tuple) and len(ret) == 2:
             entry["focus"] = ret              # 动态地图焦点比例 → 渲染推向该点
         out.append(entry)

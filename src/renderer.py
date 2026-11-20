@@ -157,6 +157,20 @@ def _render_live(src: str, src_in: float, length: float, out: Path, fps: int) ->
     return out
 
 
+class ClipPlan:
+    """一张卡要拆成前后两段时，两段时长必须正好拼回原来的镜头。"""
+
+    @staticmethod
+    def spans(entry: dict | None, length: float) -> list[dict] | None:
+        spans = (entry or {}).get("spans") or []
+        if len(spans) < 2:
+            return None
+        total = sum(float(s["length"]) for s in spans)
+        if abs(total - float(length)) > 0.05:
+            return None
+        return spans
+
+
 def render(pid: str) -> dict:
     if msg := ShotList.refusal(pid):
         raise RuntimeError(msg)
@@ -175,21 +189,36 @@ def render(pid: str) -> dict:
     cards = {c["id"]: c["png"] for c in card_entries}
     focuses = {c["id"]: tuple(c["focus"]) for c in card_entries if c.get("focus")}
     clip_paths = []
-    if not tl.get("live_cuts"):
-        for seg in tl["segments"]:
-            kind = "hook" if seg["kind"] == "hook" else \
-                "outro" if seg["kind"] == "outro" else "item"
-            focus = focuses.get(seg["id"])
-            if kind == "item":
-                kind = "map" if focus else "headline"
-            cp = clips_dir / f"{seg['id']}.mp4"
-            stale = cp.exists() and Path(cards[seg["id"]]).stat().st_mtime > cp.stat().st_mtime
-            if not cp.exists() or stale:          # 卡片更新过 → 片段作废重渲
+    by_id = {c["id"]: c for c in card_entries}
+
+    def _card_clips(seg, length, stem):
+        kind = "hook" if seg["kind"] == "hook" else \
+            "outro" if seg["kind"] == "outro" else "item"
+        focus = focuses.get(seg["id"])
+        if kind == "item":
+            kind = "map" if focus else "headline"
+        spans = ClipPlan.spans(by_id.get(seg["id"]), length)
+        if not spans:
+            cp = clips_dir / f"{stem}.mp4"
+            png = cards[seg["id"]]
+            stale = cp.exists() and Path(png).stat().st_mtime > cp.stat().st_mtime
+            if not cp.exists() or stale:
                 if cp.exists():
                     cp.unlink()
-                _render_clip(cards[seg["id"]], seg["length"], cp, tl["fps"],
-                             kind=kind, focus=focus)
+                _render_clip(png, length, cp, tl["fps"], kind=kind, focus=focus)
             clip_paths.append(cp)
+            return
+        for j, span in enumerate(spans):
+            cp = clips_dir / f"{stem}-p{j}.mp4"
+            if cp.exists():
+                cp.unlink()
+            _render_clip(span["png"], float(span["length"]), cp, tl["fps"],
+                         kind=kind, focus=focus)
+            clip_paths.append(cp)
+
+    if not tl.get("live_cuts"):
+        for seg in tl["segments"]:
+            _card_clips(seg, seg["length"], seg["id"])
     else:
         for i, piece in enumerate(ShotList.visual_pieces(tl)):
             seg = piece["seg"]
@@ -199,18 +228,9 @@ def render(pid: str) -> dict:
                     cp.unlink()
                 _render_live(piece["path"], piece["src_in"], piece["length"],
                              cp, tl["fps"])
+                clip_paths.append(cp)
             else:
-                kind = "hook" if seg["kind"] == "hook" else \
-                    "outro" if seg["kind"] == "outro" else "item"
-                focus = focuses.get(seg["id"])
-                if kind == "item":
-                    kind = "map" if focus else "headline"
-                cp = clips_dir / f"{seg['id']}-{i:02d}.mp4"
-                if cp.exists():
-                    cp.unlink()
-                _render_clip(cards[seg["id"]], piece["length"], cp, tl["fps"],
-                             kind=kind, focus=focus)
-            clip_paths.append(cp)
+                _card_clips(seg, piece["length"], f"{seg['id']}-{i:02d}")
 
     # 2) 顺序拼接
     lst = clips_dir / "concat.txt"

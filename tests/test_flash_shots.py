@@ -798,3 +798,138 @@ def test_bind_replaces_narration_and_drops_old_voice(tmp_path, monkeypatch):
     assert not (pdir / "voice.json").exists()
     assert store.stage_done(pid, "hammer") is False
     assert ShotList.bind_episode(pid) is False
+
+
+_MAP = """
+## 1. 封面（必填，单独成栏）
+- 是否指定素材静帧：否
+- 封面类型：图形设计封面
+- 主标题 / 事实副题：美澳印日四国领导人在马尼拉举行四方安全对话峰会 / 11月17日发表联合新闻稿
+
+## 2. 分镜
+CUT: 01
+时码: 00:00.00–00:15.00
+镜类: 开头钩子
+画面类型: 数据卡
+来源 URL: 自制
+许可: 自制
+起止时间: 自制
+字幕:
+  00:00.00–00:15.00  11月17日，美澳印日四国领导人在马尼拉举行四方安全对话峰会
+指定封面: 否
+
+CUT: 07
+时码: 01:23.00–01:39.00
+镜类: 正文
+画面类型: 地图卡
+来源 URL: https://www.naturalearthdata.com/about/terms-of-use/
+许可: 公有领域（Natural Earth Terms of Use）；条款页 https://www.naturalearthdata.com/about/terms-of-use/
+起止时间: 自制
+字幕:
+  01:23.00–01:31.00  联合新闻稿欢迎印太海上监视合作
+  01:31.00–01:39.00  稿件写明，2027 年定于首次举行巡逻机海上演习
+锁定元素：印太范围示意；「印太海上监视合作」；P-8、P-3C；2027 年；「稿件写明定于」；首次在四方框架下进行海上演习；署名联合新闻稿；可署名 Made with Natural Earth
+指定封面: 否
+"""
+
+
+def test_map_shot_is_a_basemap_not_credit_text():
+    assert ShotList.problems(_MAP) == []
+    shot = next(s for s in ShotList.timed_shots(_MAP) if s["no"] == 7)
+    card = ShotList._card_for(shot, shot["cues"])
+    assert card["type"] == "map" and card["extent"] == "印太"
+    blob = " ".join(card["lines"]) + card["headline"]
+    assert "印太海上监视合作" in card["headline"]
+    assert "稿件写明" in blob and "定于" in blob and "P-8" in blob
+    assert "印太范围示意" not in blob
+    assert "Made with Natural Earth" not in blob
+    for banned in ("东海", "南海", "必将"):
+        assert banned not in blob
+    assert card["phases"] == [
+        {"phase": "name", "length": 8.0},
+        {"phase": "exercise", "length": 8.0},
+    ]
+    from PIL import Image, ImageDraw, ImageFont
+
+    from src import cards
+
+    def _font(size, bold=False):
+        try:
+            return ImageFont.truetype(
+                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", size)
+        except OSError:
+            return ImageFont.load_default()
+
+    cards._FONTS.clear()
+    orig = cards._font
+    cards._font = _font
+    try:
+        img = Image.new("RGB", (cards.W, cards.H), cards.BG)
+        d = ImageDraw.Draw(img)
+        seg = {"id": "seg07", "narration": "联合新闻稿欢迎印太海上监视合作",
+               "card": card}
+        cards._draw_map(img, d, seg, {"pid": "x"})
+        land = sea = 0
+        px = img.load()
+        for y in range(320, 980, 3):
+            for x in range(120, 1100, 3):
+                c = px[x, y][:3]
+                if c == cards.LAND:
+                    land += 1
+                elif c == cards.SEA:
+                    sea += 1
+        assert land > 400 and sea > 400
+        text = Image.new("RGB", (cards.W, cards.H), cards.BG)
+        td = ImageDraw.Draw(text)
+        cards._draw_headline(text, td, {
+            "narration": "只有字",
+            "card": {"type": "headline", "full": ["印太范围示意", "Made with Natural Earth"]},
+        }, {"pid": "x"})
+        text_land = 0
+        tp = text.load()
+        for y in range(320, 980, 3):
+            for x in range(120, 1100, 3):
+                if tp[x, y][:3] == cards.LAND:
+                    text_land += 1
+        assert text_land == 0
+    finally:
+        cards._font = orig
+        cards._FONTS.clear()
+
+
+def test_map_card_change_keeps_the_voice_track(tmp_path, monkeypatch):
+    pid = _pid(tmp_path, monkeypatch)
+    from src import store
+    pdir = store.project_dir(pid)
+    assert ShotList.problems(_MAP) == []
+    (pdir / ShotList.FILENAME).write_text(_MAP, encoding="utf-8")
+    script = ShotList.script_from_shots(
+        {"title": "美澳印日四国领导人在马尼拉举行四方安全对话峰会",
+         "meta": {"date": "2026-11-17", "mode": "manual",
+                  "cover_title": "美澳印日四国领导人在马尼拉举行四方安全对话峰会",
+                  "cover_sub": "11月17日发表联合新闻稿", "expected_s": 99},
+         "segments": []},
+        ShotList.timed_shots(_MAP), *ShotList.cover_copy(_MAP))
+    script["segments"][1]["card"] = {"type": "headline", "headline": "印太范围示意",
+                                     "full": ["Made with Natural Earth"]}
+    save_json(script, pdir / "script.json")
+    (pdir / "audio" / "keep.wav").write_bytes(b"voice-bytes")
+    save_json({"segments": []}, pdir / "voice.json")
+    save_json({"pid": pid, "stages": {"script": "done", "hammer": "done",
+                                      "voice": "done", "render": "done"}},
+              pdir / "manifest.json")
+    assert ShotList.bind_episode(pid) is True
+    assert (pdir / "audio" / "keep.wav").read_bytes() == b"voice-bytes"
+    assert (pdir / "voice.json").exists()
+    got = load_json(pdir / "script.json")["segments"][1]["card"]
+    assert got["type"] == "map"
+    assert store.stage_done(pid, "voice") is True
+    assert store.stage_done(pid, "render") is False
+
+
+def test_clip_spans_must_add_up_to_the_shot():
+    from src.renderer import ClipPlan
+    spans = [{"png": "a", "length": 8}, {"png": "b", "length": 8}]
+    assert ClipPlan.spans({"spans": spans}, 16) == spans
+    assert ClipPlan.spans({"spans": spans}, 15) is None
+    assert ClipPlan.spans({}, 16) is None
