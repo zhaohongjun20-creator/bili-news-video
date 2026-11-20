@@ -99,8 +99,11 @@ class ShotList:
     def parse(text: str) -> dict:
         cover_src, _shot_src = ShotList._parts(text)
         shots = [fields for fields, _chunk in ShotList._iter_shots(text)]
-        return {"cover": ShotList._fields(cover_src, ShotList.COVER_KEYS),
-                "shots": shots}
+        cover = ShotList._fields(cover_src, ShotList.COVER_KEYS)
+        chosen = ShotList._cover_type(cover)
+        if chosen in ShotList.COVER_TYPES:
+            cover["封面类型"] = chosen
+        return {"cover": cover, "shots": shots}
 
     @staticmethod
     def _iter_shots(text: str) -> list[tuple[dict, str]]:
@@ -307,10 +310,49 @@ class ShotList:
         return []
 
     @staticmethod
+    def _selection_types(text: str) -> list[str]:
+        """「封面类型：」后面点名的封面类型。
+
+        「封面类型必须二选一，写明「纯文字封面」或「图形设计封面」」这种
+        说明句没有冒号，两边都点到，不算已经选定。
+        """
+        found: list[str] = []
+        for match in re.finditer(r"封面类型\s*[：:]\s*([^\n]*)", text or ""):
+            value = match.group(1)
+            for token in ("纯文字封面", "图形设计封面"):
+                if token in value and token not in found:
+                    found.append(token)
+        return found
+
+    @staticmethod
     def _cover_type(fields: dict) -> str:
-        raw = fields.get("封面类型", "").strip().strip("「」\"'“”")
-        if raw:
-            return raw
+        explicit = (fields.get("封面类型") or "").strip().strip("「」\"'“”")
+        if explicit in ShotList.COVER_TYPES:
+            explicit_choice: str | None = explicit
+        elif explicit:
+            named = [token for token in ("纯文字封面", "图形设计封面") if token in explicit]
+            if len(named) == 1:
+                explicit_choice = named[0]
+            elif len(named) > 1:
+                return ""
+            else:
+                return explicit
+        else:
+            explicit_choice = None
+        nested = ShotList._selection_types(fields.get("若不指定", ""))
+        nested_choice: str | None
+        if len(nested) == 1:
+            nested_choice = nested[0]
+        elif len(nested) > 1:
+            return ""
+        else:
+            nested_choice = None
+        if explicit_choice and nested_choice and explicit_choice != nested_choice:
+            return ""
+        if explicit_choice:
+            return explicit_choice
+        if nested_choice:
+            return nested_choice
         exact = []
         for val in fields.values():
             token = val.strip().strip("「」\"'“”")
