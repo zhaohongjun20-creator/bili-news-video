@@ -113,6 +113,55 @@ def _wrap(text: str, f: ImageFont.FreeTypeFont, draw, max_w: int,
     return lines
 
 
+def _wrap_all(text: str, f, draw, max_w: int) -> list[str]:
+    """按实测字宽折行，不丢掉任何一个字。"""
+    lines, cur = [], ""
+    for ch in text:
+        if cur and (draw.textlength(cur + ch, font=f) > max_w or len(cur) >= 42):
+            lines.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _draw_block(d, texts: list[str], x: int, y: int, max_w: int, max_h: int,
+                start: int, color, bold: bool = True, min_size: int = 22) -> int:
+    """缩小字号直到每行都在框内，且原文一个字都不丢。"""
+    lines_in = [t for t in texts if t]
+    size = start
+    while size >= min_size:
+        font = _font(size, bold)
+        wrapped: list[str] = []
+        ok = True
+        for text in lines_in:
+            parts = _wrap_all(text, font, d, max_w)
+            if "".join(parts) != text:
+                ok = False
+                break
+            if any(d.textlength(p, font=font) > max_w + 1 for p in parts):
+                ok = False
+                break
+            wrapped.extend(parts)
+        line_h = max(int(size * 1.35), size + 8)
+        if ok and wrapped and len(wrapped) * line_h <= max_h:
+            yy = y
+            for ln in wrapped:
+                d.text((x, yy), ln, font=font, fill=color)
+                yy += line_h
+            return yy
+        size -= 2
+    font = _font(min_size, bold)
+    yy = y
+    for text in lines_in:
+        for ln in _wrap_all(text, font, d, max_w):
+            d.text((x, yy), ln, font=font, fill=color)
+            yy += max(int(min_size * 1.35), min_size + 8)
+    return yy
+
+
 def _chrome(img: Image.Image, d: ImageDraw.ImageDraw, badge: str = "",
             label: str = "") -> None:
     """公共装饰：顶部台标条 + 徽标 + 右下角栏目名。"""
@@ -157,6 +206,11 @@ def _draw_hook(img, d, seg, meta) -> None:
 
 def _draw_headline(img, d, seg, meta) -> None:
     card = seg.get("card", {})
+    full = [ln for ln in (card.get("full") or []) if ln]
+    if full:
+        d.rectangle([120, 280, 196, 360], fill=ACCENT)
+        _draw_block(d, full, 240, 280, W - 480, 680, 64, INK, bold=True)
+        return
     headline = card.get("headline") or seg["narration"][:16]
     d.rectangle([120, 300, 220, 420], fill=ACCENT)
     f = _fit(d, headline, 96, W - 300, bold=True)
@@ -766,6 +820,22 @@ def _update_map_confirm(pid: str, script: dict) -> None:
     save_json(mc, mc_path)
 
 
+def cover_lines(script: dict) -> tuple[str, str]:
+    """封面两行字。锁定了事实副题时不用条目标题当角标。"""
+    meta = script.get("meta") or {}
+    title = (meta.get("cover_title") or script.get("title") or "").strip()
+    sub = (meta.get("cover_sub") or "").strip()
+    if sub:
+        return title, sub
+    first = next((s for s in script.get("segments", []) if s.get("kind") == "item"), None)
+    hl = ""
+    if first:
+        hl = ((first.get("card") or {}).get("headline") or "").strip()
+        if hl in title:
+            hl = ""
+    return title, hl
+
+
 def make_cover(pid: str) -> Path:
     """独立 16:9 封面：主标题大字 + 钩子副题 + 地球仪，不是片头卡缩放。"""
     script = scriptgen.load_script(pid)
@@ -776,25 +846,32 @@ def make_cover(pid: str) -> Path:
     d.rectangle([0, 0, W, 16], fill=ACCENT)
     label = meta.get("show_label") or load_config()["show"]["name"]
     d.text((140, 120), f"{label} · {meta['date']}", font=_font(44, True), fill=ACCENT)
-    title = script.get("title", "")
-    f = _fit(d, title, 84, 1060, bold=True)
-    y = 230
-    for ln in _wrap(title, f, d, 1060, max_lines=3):
-        d.text((140, y), ln, font=f, fill=INK)
-        y += int(f.size * 1.28)
-    first_item = next((s for s in script["segments"] if s.get("kind") == "item"), None)
-    if first_item:
-        hl = first_item.get("card", {}).get("headline", "")
-        if hl and hl not in title:
-            fh2 = _fit(d, hl, 44, 1000)
-            d.text((140, y + 26), "· " + hl, font=fh2, fill=GOLD)
+    title, second = cover_lines(script)
+    if meta.get("cover_sub"):
+        # 主标题按实测字宽缩成一行，避免最后一个字单独掉到下一行。
+        f = _fit(d, title, 72, 1640, bold=True)
+        d.text((140, 280), title, font=f, fill=INK)
+        if second:
+            fs = _fit(d, second, 42, 1640)
+            d.text((140, 280 + int(f.size * 1.5)), second, font=fs, fill=GOLD)
+    else:
+        f = _fit(d, title, 84, 1060, bold=True)
+        y = 230
+        for ln in _wrap(title, f, d, 1060, max_lines=3):
+            d.text((140, y), ln, font=f, fill=INK)
+            y += int(f.size * 1.28)
+        if second:
+            fh2 = _fit(d, second, 44, 1000)
+            d.text((140, y + 26), "· " + second, font=fh2, fill=GOLD)
+        first_item = next((s for s in script["segments"]
+                           if s.get("kind") == "item"), None)
+        place = resolve_place(first_item.get("card", {}).get("headline", "")
+                              if first_item else "",
+                              first_item.get("narration", "") if first_item else "")
+        if place and _load_world():
+            _draw_globe(d, place, R=320, cx=1480, cy=610,
+                        focus_iso=place.get("iso") or "")
     d.text((140, 910), "只讲发生了什么 · 各方怎么说　|　不站队 · 不评论 · 不预测",
            font=_font(34), fill=DIM)
-    place = resolve_place(first_item.get("card", {}).get("headline", "")
-                          if first_item else "",
-                          first_item.get("narration", "") if first_item else "")
-    if place and _load_world():
-        _draw_globe(d, place, R=320, cx=1480, cy=610,
-                    focus_iso=place.get("iso") or "")
     img.resize((1280, 720)).save(out, quality=90)
     return out

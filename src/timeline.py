@@ -18,18 +18,34 @@ def build_timeline(pid: str) -> dict:
     cfg = load_config()
     vcfg = cfg["video"]
     dur = {s["id"]: s["duration"] for s in voice["segments"]}
+    locked = bool(script["segments"]) and all(
+        "program_start" in seg and "program_end" in seg for seg in script["segments"])
 
     segs, t = [], 0.0
-    for seg in script["segments"]:
-        audio_s = dur[seg["id"]]
-        lead = vcfg["hook_lead_s"] if seg["kind"] == "hook" else 0.0
-        length = round(lead + audio_s + vcfg["segment_tail_s"], 3)
-        segs.append({"id": seg["id"], "kind": seg["kind"],
-                     "start": round(t, 3), "length": length,
-                     "audio_in": round(lead, 3),
-                     "audio_duration": round(audio_s, 3),
-                     "card": seg.get("card", {}).get("type", "headline")})
-        t += length
+    if locked:
+        # 分镜时码就是成片时码，不再在口播前后加起幅和尾白。
+        for seg in script["segments"]:
+            start = float(seg["program_start"])
+            end = float(seg["program_end"])
+            length = round(end - start, 3)
+            audio_s = float(dur[seg["id"]])
+            segs.append({"id": seg["id"], "kind": seg["kind"],
+                         "start": round(start, 3), "length": length,
+                         "audio_in": 0.0,
+                         "audio_duration": round(min(audio_s, length), 3),
+                         "card": seg.get("card", {}).get("type", "headline")})
+        t = max(float(seg["program_end"]) for seg in script["segments"])
+    else:
+        for seg in script["segments"]:
+            audio_s = dur[seg["id"]]
+            lead = vcfg["hook_lead_s"] if seg["kind"] == "hook" else 0.0
+            length = round(lead + audio_s + vcfg["segment_tail_s"], 3)
+            segs.append({"id": seg["id"], "kind": seg["kind"],
+                         "start": round(t, 3), "length": length,
+                         "audio_in": round(lead, 3),
+                         "audio_duration": round(audio_s, 3),
+                         "card": seg.get("card", {}).get("type", "headline")})
+            t += length
     tl = {"segments": segs, "total_s": round(t, 2),
           "fps": vcfg["fps"], "width": vcfg["width"], "height": vcfg["height"],
           "live_cuts": ShotList.live_cuts(pid)}

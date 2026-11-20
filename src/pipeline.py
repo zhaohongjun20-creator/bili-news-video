@@ -22,6 +22,8 @@ def make(pid: str, offline: bool = False) -> dict:
     if not store.stage_done(pid, "script"):
         scriptgen.build_script(pid)
         steps.append("script")
+    if ShotList.bind_episode(pid):
+        steps.append("cues")
     if not store.stage_done(pid, "hammer"):
         report = hammer.hammer(pid)
         if report["status"] == "rejected":

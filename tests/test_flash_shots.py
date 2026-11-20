@@ -497,3 +497,304 @@ def _passing_live_doc(media_line: str, program: str = "00:15.00–00:23.00") -> 
         live,
         "",
     ])
+
+
+_LOCKED = """
+## 1. 封面（必填，单独成栏）
+- 是否指定素材静帧：否
+- 封面类型：图形设计封面
+- 主标题 / 事实副题：美澳印日四国领导人在马尼拉举行四方安全对话峰会 / 11月17日发表联合新闻稿
+
+## 2. 分镜
+
+CUT: 01
+时码: 00:00.00–00:15.00
+镜类: 开头钩子
+画面类型: 数据卡
+来源 URL: 自制
+许可: 自制
+起止时间: 自制
+字幕:
+  00:00.00–00:06.00  11月17日，美澳印日四国领导人
+  00:06.00–00:12.00  在马尼拉举行四方安全对话峰会
+  00:12.00–00:15.00  并发表联合新闻稿
+指定封面: 否
+
+CUT: 02
+时码: 00:15.00–00:25.00
+镜类: 正文
+画面类型: 数据卡
+来源 URL: 自制
+许可: 自制
+起止时间: 自制
+字幕:
+  00:15.00–00:20.00  日方官方摘要写明
+  00:20.00–00:25.00  会谈当地时间 18:45 开始，约 90 分钟
+锁定元素：日期 2026年11月17日；当地时间 18:45（日本时间 19:45）；约 90 分钟；署名「日本首相官邸官方摘要」；可出现高市早苗当时在马尼拉出席东盟相关峰会，不添加其他行程
+指定封面: 否
+
+CUT: 04
+时码: 00:37.00–00:53.00
+镜类: 正文
+画面类型: 数据卡
+来源 URL: 自制
+许可: 自制
+起止时间: 自制
+字幕:
+  00:37.00–00:45.00  联合新闻稿写明，强烈反对以武力或胁迫改变现状
+  00:45.00–00:53.00  并对经济胁迫表示严重关切；此段未点名国家或海域
+锁定元素：只出示联合新闻稿原句要点：改变现状、武力或胁迫、经济胁迫、任意出口限制；画面或字幕须保留「未点名特定国家或海域」；署名联合新闻稿
+指定封面: 否
+
+CUT: 05
+时码: 00:53.00–01:09.00
+镜类: 正文
+画面类型: 数据卡
+来源 URL: 自制
+许可: 自制
+起止时间: 自制
+字幕:
+  00:53.00–00:59.00  日本首相官邸官方摘要写明
+  00:59.00–01:05.00  会上谈到印太局势，包括东海和南海
+  01:05.00–01:09.00  联合新闻稿未点名海域
+锁定元素：必须署名「日本首相官邸官方摘要」；可出现「东海和南海」，并必须同时写明「联合新闻稿未点名海域」；其余只用摘要中的改变现状、武力或胁迫、经济胁迫、关键供应链
+指定封面: 否
+
+CUT: 06
+时码: 01:09.00–01:23.00
+镜类: 正文
+画面类型: 数据卡
+来源 URL: 自制
+许可: 自制
+起止时间: 自制
+字幕:
+  01:09.00–01:16.00  稿件写明，首届工商领袖论坛定于 2027 年初举行
+  01:16.00–01:23.00  并重申 Super Intelligence Accelerator
+指定封面: 否
+
+CUT: 07
+时码: 01:23.00–01:39.00
+镜类: 正文
+画面类型: 数据卡
+来源 URL: 自制
+许可: 自制
+起止时间: 自制
+字幕:
+  01:23.00–01:31.00  联合新闻稿欢迎印太海上监视合作
+  01:31.00–01:39.00  稿件写明，2027 年定于首次举行巡逻机海上演习
+锁定元素：印太范围示意；「印太海上监视合作」；P-8、P-3C；2027 年；「稿件写明定于」；首次在四方框架下进行海上演习；署名联合新闻稿
+指定封面: 否
+
+CUT: 10
+时码: 02:07.00–02:23.00
+镜类: 正文
+画面类型: 数据卡
+来源 URL: 自制
+许可: 自制
+起止时间: 自制
+字幕:
+  02:07.00–02:15.00  日方官方摘要写明，高市早苗谈到海上安全、经济安全与关键技术
+  02:15.00–02:23.00  并提到 POWERR Asia 和 POWERR Gulf 倡议
+锁定元素：必须署名「日本首相官邸官方摘要」；海上安全、经济安全与能源、关键和新兴技术；POWERR Asia；POWERR Gulf
+指定封面: 否
+"""
+
+
+def _shot(text, no):
+    return next(s for s in ShotList.timed_shots(text) if s["no"] == no)
+
+
+def test_locked_beats_keep_wording_and_cover_copy():
+    shots = ShotList.timed_shots(_LOCKED)
+    assert [s["no"] for s in shots] == [1, 2, 4, 5, 6, 7, 10]
+    hook = shots[0]["cues"]
+    assert [(c["start"], c["end"], c["text"]) for c in hook] == [
+        (0.0, 6.0, "11月17日，美澳印日四国领导人"),
+        (6.0, 12.0, "在马尼拉举行四方安全对话峰会"),
+        (12.0, 15.0, "并发表联合新闻稿"),
+    ]
+    assert ShotList.cover_copy(_LOCKED) == (
+        "美澳印日四国领导人在马尼拉举行四方安全对话峰会",
+        "11月17日发表联合新闻稿",
+    )
+    built = ShotList.script_from_shots(
+        {"title": "旧标题", "meta": {"mode": "manual", "date": "2026-11-17"},
+         "segments": []},
+        shots, *ShotList.cover_copy(_LOCKED))
+    assert built["title"] == "美澳印日四国领导人在马尼拉举行四方安全对话峰会"
+    assert "会谈起止" not in built["title"]
+    assert "东海" not in built["title"] and "南海" not in built["title"]
+    assert built["meta"]["cover_sub"] == "11月17日发表联合新闻稿"
+    assert built["segments"][0]["narration"] == (
+        "11月17日，美澳印日四国领导人"
+        "在马尼拉举行四方安全对话峰会"
+        "并发表联合新闻稿")
+    assert "美国、澳大利亚" not in built["segments"][0]["narration"]
+
+    card2 = ShotList.card_lines(_shot(_LOCKED, 2)["cues"], _shot(_LOCKED, 2)["locked"])
+    assert "会谈当地时间 18:45 开始，约 90 分钟" in card2
+    assert "当地时间 18:45（日本时间 19:45）" in card2
+    assert "会谈起止" not in "".join(card2)
+
+    card4 = "".join(ShotList.card_lines(
+        _shot(_LOCKED, 4)["cues"], _shot(_LOCKED, 4)["locked"]))
+    assert "东海" not in card4 and "南海" not in card4
+    assert "未点名" in card4
+
+    card5 = "".join(ShotList.card_lines(
+        _shot(_LOCKED, 5)["cues"], _shot(_LOCKED, 5)["locked"]))
+    assert "日本首相官邸官方摘要" in card5
+    assert "联合新闻稿未点名海域" in card5
+    assert "东海和南海" in card5
+
+    for no in (6, 7):
+        spoken = "".join(c["text"] for c in _shot(_LOCKED, no)["cues"])
+        assert "稿件写明" in spoken and "定于" in spoken
+
+    spoken10 = [c["text"] for c in _shot(_LOCKED, 10)["cues"]]
+    assert spoken10 == [
+        "日方官方摘要写明，高市早苗谈到海上安全、经济安全与关键技术",
+        "并提到 POWERR Asia 和 POWERR Gulf 倡议",
+    ]
+    card10 = "".join(ShotList.card_lines(
+        _shot(_LOCKED, 10)["cues"], _shot(_LOCKED, 10)["locked"]))
+    for banned in ("朝鲜", "绑架", "中东", "伊朗"):
+        assert banned not in card10
+
+
+def test_untimed_subtitle_does_not_become_locked_beats():
+    assert ShotList.timed_shots(_passing_live_doc("footage/clip.mp4")) == []
+
+
+def test_locked_program_times_skip_audio_padding(tmp_path, monkeypatch):
+    pid = _pid(tmp_path, monkeypatch)
+    from src import store
+    from src.timeline import build_timeline
+    pdir = store.project_dir(pid)
+    ranges = [(0, 15), (15, 25), (25, 37), (37, 53), (53, 69),
+              (69, 83), (83, 99), (99, 113), (113, 127), (127, 143)]
+    segments = []
+    voice = []
+    for i, (a, b) in enumerate(ranges, 1):
+        sid = f"seg{i:02d}"
+        segments.append({"id": sid, "kind": "hook" if i == 1 else "item",
+                         "narration": "口播", "program_start": float(a),
+                         "program_end": float(b),
+                         "card": {"type": "headline"}})
+        voice.append({"id": sid, "duration": 4.0, "wav": "a.wav"})
+    save_json({"title": "t", "meta": {"date": "2026-11-17"},
+               "segments": segments}, pdir / "script.json")
+    save_json({"segments": voice}, pdir / "voice.json")
+    tl = build_timeline(pid)
+    assert [(s["start"], s["length"]) for s in tl["segments"]] == [
+        (float(a), float(b - a)) for a, b in ranges]
+    assert all(s["audio_in"] == 0 for s in tl["segments"])
+    assert tl["total_s"] == 143
+
+
+def test_locked_subtitle_events_use_cue_times():
+    from src.renderer import subtitle_events
+    cues = {"seg01": [
+        {"start": 0.0, "end": 6.0, "text": "11月17日，美澳印日四国领导人"},
+        {"start": 6.0, "end": 12.0, "text": "在马尼拉举行四方安全对话峰会"},
+        {"start": 12.0, "end": 15.0, "text": "并发表联合新闻稿"},
+    ]}
+    tl = [{"id": "seg01", "start": 0.0, "audio_in": 0.3, "audio_duration": 9.0}]
+    ev = subtitle_events(
+        {"seg01": "11月17日，美国、澳大利亚、印度和日本四国领导人在马尼拉举行。"},
+        tl, cues)
+    assert ev == [
+        (0.0, 6.0, "11月17日，美澳印日四国领导人"),
+        (6.0, 12.0, "在马尼拉举行四方安全对话峰会"),
+        (12.0, 15.0, "并发表联合新闻稿"),
+    ]
+
+
+def test_cover_lines_do_not_use_the_item_headline():
+    from src.cards import cover_lines
+    script = {
+        "title": "美澳印日四国领导人在马尼拉举行四方安全对话峰会",
+        "meta": {"cover_title": "美澳印日四国领导人在马尼拉举行四方安全对话峰会",
+                 "cover_sub": "11月17日发表联合新闻稿"},
+        "segments": [{"kind": "item", "card": {"headline": "会谈起止"}}],
+    }
+    assert cover_lines(script) == (
+        "美澳印日四国领导人在马尼拉举行四方安全对话峰会",
+        "11月17日发表联合新闻稿",
+    )
+
+
+def test_wrap_all_keeps_every_character():
+    from src.cards import _wrap_all
+
+    class _Draw:
+        def textlength(self, text, font=None):
+            return len(text) * 10
+
+    text = "会谈当地时间 18:45 开始，约 90 分钟" * 3
+    lines = _wrap_all(text, None, _Draw(), 80)
+    assert "".join(lines) == text
+    assert all(len(ln) <= 8 for ln in lines)
+
+
+def test_bind_refuses_a_shot_list_that_fails_the_gate(tmp_path, monkeypatch):
+    pid = _pid(tmp_path, monkeypatch)
+    from src import store
+    pdir = store.project_dir(pid)
+    (pdir / ShotList.FILENAME).write_text(
+        "CUT: 01\n时码: 00:00.00–00:15.00\n字幕:\n  00:00.00–00:06.00  只有半句\n",
+        encoding="utf-8")
+    save_json({"title": "保持不动", "meta": {"date": "2026-11-17", "mode": "manual"},
+               "segments": [{"id": "seg01", "kind": "hook", "narration": "旧口播"}]},
+              pdir / "script.json")
+    assert ShotList.bind_episode(pid) is False
+    assert load_json(pdir / "script.json")["segments"][0]["narration"] == "旧口播"
+
+
+def test_bind_replaces_narration_and_drops_old_voice(tmp_path, monkeypatch):
+    pid = _pid(tmp_path, monkeypatch)
+    from src import store
+    pdir = store.project_dir(pid)
+    text = "\n".join([
+        "## 1. 封面（必填，单独成栏）",
+        "- 是否指定素材静帧：否",
+        "- 封面类型：图形设计封面",
+        "- 主标题 / 事实副题：美澳印日四国领导人在马尼拉举行四方安全对话峰会 / 11月17日发表联合新闻稿",
+        "## 2. 分镜",
+        "CUT: 01",
+        "时码: 00:00.00–00:15.00",
+        "镜类: 开头钩子",
+        "画面类型: 数据卡",
+        "来源 URL: 自制",
+        "许可: 自制",
+        "起止时间: 自制",
+        "字幕:",
+        "  00:00.00–00:06.00  11月17日，美澳印日四国领导人",
+        "  00:06.00–00:12.00  在马尼拉举行四方安全对话峰会",
+        "  00:12.00–00:15.00  并发表联合新闻稿",
+        "指定封面: 否",
+    ])
+    assert ShotList.problems(text) == []
+    (pdir / ShotList.FILENAME).write_text(text, encoding="utf-8")
+    save_json({"title": "旧标题", "meta": {"date": "2026-11-17", "mode": "manual",
+                                         "show_label": "时政快讯"},
+               "segments": [{"id": "seg01", "kind": "hook",
+                             "narration": "11月17日，美国、澳大利亚、印度和日本。",
+                             "card": {"headline": "会谈起止"}}]},
+              pdir / "script.json")
+    (pdir / "audio").mkdir(exist_ok=True)
+    (pdir / "audio" / "old.wav").write_bytes(b"not-audio")
+    (pdir / "voice.json").write_text("{}", encoding="utf-8")
+    save_json({"pid": pid, "stages": {"script": "done", "hammer": "done",
+                                      "voice": "done"}},
+              pdir / "manifest.json")
+    assert ShotList.bind_episode(pid) is True
+    script = load_json(pdir / "script.json")
+    assert script["segments"][0]["narration"].startswith("11月17日，美澳印日四国领导人")
+    assert "美国、澳大利亚" not in script["segments"][0]["narration"]
+    assert script["meta"]["cover_sub"] == "11月17日发表联合新闻稿"
+    assert script["segments"][0]["card"]["headline"] != "会谈起止"
+    assert not (pdir / "audio" / "old.wav").exists()
+    assert not (pdir / "voice.json").exists()
+    assert store.stage_done(pid, "hammer") is False
+    assert ShotList.bind_episode(pid) is False

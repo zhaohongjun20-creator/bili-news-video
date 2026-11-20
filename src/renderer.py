@@ -46,10 +46,17 @@ def _ass_escaped(t: str) -> str:
     return t.replace("\n", r"\N")
 
 
-def subtitle_events(narr_map: dict, tl_segs: list) -> list[tuple[float, float, str]]:
-    """字幕事件：行时长按字数加权分配段内音频窗口（长行多占时，不是均分）。"""
+def subtitle_events(narr_map: dict, tl_segs: list,
+                    cues_by_id: dict | None = None) -> list[tuple[float, float, str]]:
+    """字幕事件。有锁定字幕拍时用拍的时码和原文，否则按字数分音频窗口。"""
     events: list[tuple[float, float, str]] = []
+    cues_by_id = cues_by_id or {}
     for seg in tl_segs:
+        locked = cues_by_id.get(seg["id"])
+        if locked:
+            for cue in locked:
+                events.append((float(cue["start"]), float(cue["end"]), cue["text"]))
+            continue
         lines = scriptgen.narration_lines(narr_map[seg["id"]])
         if not lines:
             continue
@@ -67,8 +74,9 @@ def subtitle_events(narr_map: dict, tl_segs: list) -> list[tuple[float, float, s
 def build_ass(pid: str, tl: dict) -> Path:
     script = scriptgen.load_script(pid)
     nar = {s["id"]: s["narration"] for s in script["segments"]}
+    cues = {s["id"]: s["cues"] for s in script["segments"] if s.get("cues")}
     lines = [f"Dialogue: 0,{_ts(s0)},{_ts(s1)},News,,0,0,0,,{_ass_escaped(ln)}"
-             for s0, s1, ln in subtitle_events(nar, tl["segments"])]
+             for s0, s1, ln in subtitle_events(nar, tl["segments"], cues)]
     ass = store.project_dir(pid) / "output" / "subs.ass"
     ass.parent.mkdir(exist_ok=True)
     ass.write_text(ASS_HEADER.format(w=tl["width"], h=tl["height"],
@@ -217,13 +225,21 @@ def render(pid: str) -> dict:
     # 3) 配音轨按时间轴摆位（adelay）+ 混流 + 字幕烧录 + 响度规范
     voice = _load_voice(pid)
     filters, mix_in = [], []
-    for i, seg in enumerate(voice["segments"]):
-        tseg = next(s for s in tl["segments"] if s["id"] == seg["id"])
-        delay_ms = int((tseg["start"] + tseg["audio_in"]) * 1000)
-        mix_in += ["-i", str(seg["wav"])]
+    placed = _voice_placements(voice, tl)
+    for i, (wav, at) in enumerate(placed):
+        delay_ms = int(round(at * 1000))
+        mix_in += ["-i", str(wav)]
         filters.append(f"[{i + 1}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
-    filters.append("".join(f"[a{i}]" for i in range(len(voice["segments"])))
-                   + f"amix=inputs={len(voice['segments'])}:normalize=0,"
+    n_mix = len(placed)
+    labels = "".join(f"[a{i}]" for i in range(n_mix))
+    if any(seg.get("cues") for seg in voice["segments"]):
+        # 分拍口播之间是静音。补一条与成片等长的静音，避免 -shortest 切在最后一句。
+        mix_in += ["-f", "lavfi", "-t", f"{float(tl['total_s']):.3f}", "-i",
+                   "anullsrc=channel_layout=mono:sample_rate=44100"]
+        filters.append(f"[{n_mix + 1}:a]anull[asil]")
+        labels += "[asil]"
+        n_mix += 1
+    filters.append(labels + f"amix=inputs={n_mix}:normalize=0,"
                    "loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
     ass = build_ass(pid, tl)
     final = out_dir / "final.mp4"
@@ -257,6 +273,19 @@ def _load_cards(pid: str) -> list[dict]:
     if not c:
         raise RuntimeError(f"cards.json 缺失: {pid}")
     return c["cards"]
+
+
+def _voice_placements(voice: dict, tl: dict) -> list[tuple[str, float]]:
+    """(wav, 成片秒)。有字幕拍时每拍单独摆位；否则一段一个 wav。"""
+    placed = []
+    for seg in voice["segments"]:
+        if seg.get("cues"):
+            for cue in seg["cues"]:
+                placed.append((cue["wav"], float(cue["at"])))
+            continue
+        tseg = next(s for s in tl["segments"] if s["id"] == seg["id"])
+        placed.append((seg["wav"], tseg["start"] + tseg["audio_in"]))
+    return placed
 
 
 def _load_voice(pid: str) -> dict:

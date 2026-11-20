@@ -36,6 +36,7 @@ class ShotList:
     _URL = re.compile(r"https?://[^\s）)】>，,；;\"']+")
     _TC = r"(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?"
     _RANGE = re.compile(rf"(?P<a>{_TC})\s*[–—\-－~]\s*(?P<b>{_TC})")
+    _CUE = re.compile(rf"^\s*(?P<a>{_TC})\s*[–—\-－~]\s*(?P<b>{_TC})\s+(?P<text>\S.*?)\s*$")
     _ONE = re.compile(rf"^{_TC}$")
     _FIELD = re.compile(r"^(?:[-*]\s*)?([^：:\n]{1,40})[：:]\s*(.*)$")
     _PAREN = re.compile(r"^[（(][^）)]*[）)]$")
@@ -104,6 +105,225 @@ class ShotList:
         if chosen in ShotList.COVER_TYPES:
             cover["封面类型"] = chosen
         return {"cover": cover, "shots": shots}
+
+    @staticmethod
+    def timed_shots(text: str) -> list[dict]:
+        """每镜都有成片时码和分时字幕才返回。缺任何一镜就返回空，不拿事实句去补。"""
+        shots = []
+        for fields, chunk in ShotList._iter_shots(text):
+            span = ShotList._range(fields.get("时码", ""))
+            cues = ShotList._cue_lines(chunk)
+            if span is None or not cues:
+                return []
+            locked = ""
+            if m := re.search(r"锁定元素[：:]\s*(.+)", chunk):
+                locked = m.group(1).strip()
+            shots.append({
+                "no": fields.get("no"),
+                "start": span[0],
+                "end": span[1],
+                "kind": "hook" if "钩子" in fields.get("镜类", "") else "item",
+                "cues": cues,
+                "locked": locked,
+            })
+        return shots
+
+    @staticmethod
+    def _cue_lines(chunk: str) -> list[dict]:
+        cues = []
+        armed = False
+        for raw in chunk.splitlines():
+            head = re.match(r"^\s*字幕\s*[：:]\s*(.*)$", raw)
+            if head and not armed:
+                armed = True
+                raw = head.group(1)
+                if not raw.strip():
+                    continue
+            if not armed:
+                continue
+            m = ShotList._CUE.match(raw)
+            if not m:
+                if raw.strip():
+                    break
+                continue
+            a, b = ShotList._seconds(m.group("a")), ShotList._seconds(m.group("b"))
+            text = m.group("text").strip()
+            if a is None or b is None or b <= a or not text:
+                continue
+            cues.append({"start": a, "end": b, "text": text})
+        return cues
+
+    @staticmethod
+    def cover_copy(text: str) -> tuple[str, str]:
+        """主标题 / 事实副题。写了别的句子也不另造。"""
+        cover_src, _rest = ShotList._parts(text)
+        m = re.search(r"主标题\s*/\s*事实副题\s*[：:]\s*(.+?)\s*/\s*(.+)", cover_src)
+        if not m:
+            return "", ""
+        title = m.group(1).strip()
+        sub = m.group(2).strip().splitlines()[0].strip()
+        return title, sub
+
+    @staticmethod
+    def card_lines(cues: list[dict], locked: str = "") -> list[str]:
+        """卡面正文：字幕拍全文，再加上锁定元素里还没出现的事实短句。
+
+        禁止项不进卡面。已经写在字幕里的短句不重复。
+        """
+        drop = ("不添加", "不出现", "不把", "不加", "不生成", "不画",
+                "不用", "不要", "不点名", "不虚构", "不站队")
+        prefixes = (
+            "只出示联合新闻稿原句要点：",
+            "画面或字幕须保留",
+            "必须同时写明",
+            "必须署名",
+            "其余只用摘要中的",
+            "可出现",
+            "只出示",
+            "脚注：",
+            "议题仅限",
+            "可署名",
+            "署名",
+        )
+        lines = [c["text"].strip() for c in cues if str(c.get("text", "")).strip()]
+        have = "\n".join(lines)
+
+        def strip_prefix(piece: str) -> str:
+            for pre in prefixes:
+                if piece.startswith(pre):
+                    return piece[len(pre):].strip()
+            return piece
+
+        for part in re.split(r"[；;]", locked or ""):
+            part = part.strip()
+            if not part:
+                continue
+            pieces = [part]
+            if any(k in part for k in drop):
+                pieces = [p.strip() for p in re.split(r"[，,]", part)
+                          if p.strip() and not any(k in p for k in drop)]
+            for piece in pieces:
+                quotes = re.findall(r"「([^」]+)」", piece)
+                if quotes and all(q in have for q in quotes):
+                    continue
+                piece = strip_prefix(piece).strip()
+                if piece.startswith("「") and piece.endswith("」"):
+                    piece = piece[1:-1].strip()
+                if not piece or piece in have:
+                    continue
+                lines.append(piece)
+                have += "\n" + piece
+        return lines
+
+    @staticmethod
+    def script_from_shots(script: dict, shots: list[dict],
+                          title: str = "", sub: str = "") -> dict:
+        """用锁定时码和字幕拍重建口播。不改写字幕句子。"""
+        meta = dict(script.get("meta") or {})
+        if title:
+            meta["cover_title"] = title
+        if sub:
+            meta["cover_sub"] = sub
+        if shots:
+            meta["expected_s"] = int(round(float(shots[-1]["end"])))
+        segments = []
+        for i, shot in enumerate(shots, 1):
+            cues = shot["cues"]
+            full = ShotList.card_lines(cues, shot.get("locked", ""))
+            segments.append({
+                "id": f"seg{i:02d}",
+                "kind": shot["kind"],
+                "narration": "".join(c["text"] for c in cues),
+                "program_start": shot["start"],
+                "program_end": shot["end"],
+                "cues": cues,
+                "card": {
+                    "type": "headline",
+                    "headline": cues[0]["text"],
+                    "sub": "",
+                    "lines": full[1:],
+                    "full": full,
+                },
+            })
+        out = dict(script)
+        out["meta"] = meta
+        if title:
+            out["title"] = title
+        out["segments"] = segments
+        return out
+
+    @staticmethod
+    def bind_episode(pid: str) -> bool:
+        """分镜清单每镜都有字幕拍时，用它替换口播、卡片和封面文案。
+
+        清单没过许可门、或有镜没有分时字幕，则什么都不改。
+        文案变了就丢掉旧配音、字幕和卡片，并让锤稿之后的阶段重跑。
+        """
+        from src import scriptgen, store
+        path = store.project_dir(pid) / ShotList.FILENAME
+        if not path.is_file():
+            return False
+        text = path.read_text(encoding="utf-8")
+        shots = ShotList.timed_shots(text)
+        if not shots or ShotList.problems(text):
+            return False
+        try:
+            script = scriptgen.load_script(pid)
+        except RuntimeError:
+            return False
+        title, sub = ShotList.cover_copy(text)
+        new = ShotList.script_from_shots(script, shots, title, sub)
+        if ShotList._same_episode(script, new):
+            return False
+        from src.jsonio import save_json
+        save_json(new, store.project_dir(pid) / "script.json")
+        ShotList._drop_stale_media(pid)
+        store.redo_stage(pid, "hammer")
+        return True
+
+    @staticmethod
+    def _same_episode(old: dict, new: dict) -> bool:
+        if (old.get("title") or "") != (new.get("title") or ""):
+            return False
+        om, nm = old.get("meta") or {}, new.get("meta") or {}
+        for key in ("cover_title", "cover_sub", "expected_s"):
+            if om.get(key) != nm.get(key):
+                return False
+        osegs, nsegs = old.get("segments") or [], new.get("segments") or []
+        if len(osegs) != len(nsegs):
+            return False
+        for a, b in zip(osegs, nsegs):
+            if a.get("narration") != b.get("narration"):
+                return False
+            if a.get("kind") != b.get("kind"):
+                return False
+            if list(a.get("cues") or []) != list(b.get("cues") or []):
+                return False
+            if (a.get("card") or {}).get("full") != (b.get("card") or {}).get("full"):
+                return False
+            for key in ("program_start", "program_end"):
+                if a.get(key) != b.get(key):
+                    return False
+        return True
+
+    @staticmethod
+    def _drop_stale_media(pid: str) -> None:
+        from src import store
+        pdir = store.project_dir(pid)
+        for name in ("audio", "cards", "clips"):
+            folder = pdir / name
+            if not folder.is_dir():
+                continue
+            for f in folder.iterdir():
+                if f.is_file():
+                    f.unlink()
+        out = pdir / "output"
+        if out.is_dir():
+            for name in ("subs.ass", "final.mp4", "cover.jpg", "render.json",
+                         "qc_report.json", "_silent.mp4"):
+                (out / name).unlink(missing_ok=True)
+        for name in ("voice.json", "timeline.json", "cards.json"):
+            (pdir / name).unlink(missing_ok=True)
 
     @staticmethod
     def _iter_shots(text: str) -> list[tuple[dict, str]]:
