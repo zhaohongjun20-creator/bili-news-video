@@ -265,13 +265,16 @@ def test_live_cut_lands_on_program_timecode(tmp_path, monkeypatch):
     assert abs(covered - tl["segments"][0]["length"]) < 0.02
     assert ShotList.placement_problems(tl) == []
 
-    from src.renderer import live_clip_command
+    from src.renderer import WH_PROMO_H, WH_PROMO_REF_H, WH_PROMO_Y, live_clip_command
     cmd = live_clip_command(cut["path"], live[0]["src_in"], live[0]["length"],
                             pdir / "clips" / "live.mp4", 30)
     assert "-ss" in cmd and "12.000" in cmd
     assert "-an" in cmd
     joined = " ".join(cmd)
     assert "fade" not in joined and "xfade" not in joined
+    assert f"ih*{WH_PROMO_Y}/{WH_PROMO_REF_H}" in joined
+    assert f"ih*{WH_PROMO_H}/{WH_PROMO_REF_H}" in joined
+    assert "force_original_aspect_ratio=decrease" in joined
 
 
 def test_live_without_local_file_or_from_finished_video_does_not_render(
@@ -376,6 +379,51 @@ def test_duration_mismatch_does_not_enter_render(tmp_path, monkeypatch):
     assert ShotList.problems(text) == []
     msg = ShotList.refusal(pid)
     assert msg and "长度与素材起止不一致" in msg
+
+
+def test_promo_band_is_covered_without_stretching(tmp_path):
+    """1280×720 上第 590–679 行的宣传条被盖住；条上、条下的画面还在，人脸不变形。"""
+    from PIL import Image
+
+    from src import ffmpeg
+    from src.renderer import WH_PROMO_H, WH_PROMO_REF_H, WH_PROMO_Y, live_picture_filter
+
+    assert (WH_PROMO_Y, WH_PROMO_H, WH_PROMO_REF_H) == (590, 90, 720)
+    src = tmp_path / "src.png"
+    out = tmp_path / "out.png"
+    im = Image.new("RGB", (1280, 720), (10, 20, 40))
+    px = im.load()
+    for y in range(180, 221):
+        for x in range(600, 681):
+            px[x, y] = (255, 0, 0)
+    for y in range(WH_PROMO_Y, WH_PROMO_Y + WH_PROMO_H):
+        for x in range(1280):
+            px[x, y] = (250, 250, 250)
+    for y in range(620, 661):
+        for x in range(1180, 1241):
+            px[x, y] = (0, 0, 0)
+    for y in range(690, 720):
+        for x in range(600, 681):
+            px[x, y] = (0, 255, 0)
+    im.save(src)
+
+    cmd = [ffmpeg.ffmpeg_exe(), "-y", "-i", str(src),
+           "-vf", live_picture_filter(), "-frames:v", "1", str(out)]
+    r = ffmpeg.run(cmd, timeout=60)
+    assert r.returncode == 0, r.stderr[-400:]
+    got = Image.open(out)
+    assert got.size == (1920, 1080)
+    g = got.load()
+
+    def at(sx, sy):
+        return g[round(sx * 1920 / 1280), round(sy * 1080 / 720)]
+
+    assert at(640, 200)[0] > 200 and at(640, 200)[1] < 40
+    assert at(400, 640) == (0, 0, 0)
+    assert at(1210, 640) == (0, 0, 0)
+    assert at(640, 700)[1] > 200 and at(640, 700)[0] < 40
+    # 16:9 进、16:9 出，条下的画面仍在底边，没有被裁掉后再拉高
+    assert at(640, 710)[1] > 200
 
 
 def test_card_only_timeline_has_no_live_cuts(tmp_path, monkeypatch):

@@ -111,14 +111,33 @@ def _render_clip(png: str, length: float, out: Path, fps: int,
     return out
 
 
+# 白宫官方片源下沿宣传条，在 1280×720 帧上实测（两支视频同一位置）：
+# 白宫页面嵌入的成片帧与 i.ytimg.com 的 maxresdefault 逐字节相同。
+# 第 589 行仍是画面，第 590–679 行是台标、短信、二维码和 APP.GOV（含上下过渡），
+# 第 680 行起又是画面。高 90 像素，正好是画面高度的 1/8。不是贴底色条，
+# 所以盖住这一段，不把条下面的画面一起裁掉，也不拉伸人脸。
+WH_PROMO_REF_H = 720
+WH_PROMO_Y = 590
+WH_PROMO_H = 90
+
+
+def live_picture_filter() -> str:
+    """盖住宣传条，再按原比例缩放到 1920×1080。"""
+    y = f"ih*{WH_PROMO_Y}/{WH_PROMO_REF_H}"
+    h = f"ih*{WH_PROMO_H}/{WH_PROMO_REF_H}"
+    return (
+        f"drawbox=x=0:y={y}:w=iw:h={h}:color=black:t=fill,"
+        "scale=1920:1080:force_original_aspect_ratio=decrease,"
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1"
+    )
+
+
 def live_clip_command(src: str, src_in: float, length: float, out: Path,
                       fps: int) -> list:
-    """实拍片段：按素材入点裁切，硬切，不淡入淡出，不带原声音轨。"""
-    vf = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
-          "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1")
+    """实拍片段：按素材入点裁切，盖住下沿宣传条，硬切，不淡入淡出，不带原声音轨。"""
     return [ffmpeg.ffmpeg_exe(), "-y", "-i", str(src),
             "-ss", f"{src_in:.3f}", "-t", f"{length:.3f}",
-            "-vf", vf, "-an", "-pix_fmt", "yuv420p",
+            "-vf", live_picture_filter(), "-an", "-pix_fmt", "yuv420p",
             "-c:v", "libx264", "-preset", "fast", "-crf", "20",
             "-r", str(fps), str(out)]
 
