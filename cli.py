@@ -16,6 +16,7 @@ import json
 import sys
 
 from src import ingest, pipeline, preflight, publisher, review, store
+from src.shotlist import ShotList
 from src.config import load_config
 
 
@@ -64,6 +65,14 @@ def cmd_ingest_script(a) -> None:
     pid = manual.ingest_script(a.file, date=a.date or "", label=a.label or "")
     print(f"{pid}: 人工稿解析完成")
     print(f"下一步: python cli.py make {pid}")
+
+
+def cmd_shotlist(a) -> None:
+    try:
+        path = ShotList.write(a.pid)
+    except RuntimeError as e:
+        _die(str(e))
+    print(f"分镜清单: {path}")
 
 
 def cmd_make(a) -> None:
@@ -198,6 +207,9 @@ def main() -> None:
     p.add_argument("--date", default="")
     p.add_argument("--label", default="", help="卡面栏目名（默认「军事快讯」）")
     p.set_defaults(func=cmd_ingest_script)
+    p = sub.add_parser("shotlist", help="红审通过后，从线索包生成分镜清单.md")
+    p.add_argument("pid")
+    p.set_defaults(func=cmd_shotlist)
     p = sub.add_parser("make")
     p.add_argument("pid")
     p.add_argument("--offline", action="store_true", help="强制模板降级（无网联调）")

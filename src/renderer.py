@@ -8,6 +8,8 @@
     outro    卡住不动，仅收尾 0.4s 淡黑
 字幕：54 号、贴近底边安全区（避开地图注记），行时长按字数加权分配。
 项目目录若有分镜清单.md，许可门不过则在任何编码之前拒绝。
+没有这份文件时，只有纯卡面、且项目里没有外部实拍，才继续渲染。
+已过门的实拍按成片时码硬切进时间轴；封面仍是设计卡，不从成片或未过门素材抽帧。
 """
 from pathlib import Path
 
@@ -109,35 +111,79 @@ def _render_clip(png: str, length: float, out: Path, fps: int,
     return out
 
 
+def live_clip_command(src: str, src_in: float, length: float, out: Path,
+                      fps: int) -> list:
+    """实拍片段：按素材入点裁切，硬切，不淡入淡出，不带原声音轨。"""
+    vf = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
+          "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1")
+    return [ffmpeg.ffmpeg_exe(), "-y", "-i", str(src),
+            "-ss", f"{src_in:.3f}", "-t", f"{length:.3f}",
+            "-vf", vf, "-an", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-r", str(fps), str(out)]
+
+
+def _render_live(src: str, src_in: float, length: float, out: Path, fps: int) -> Path:
+    r = ffmpeg.run(live_clip_command(src, src_in, length, out, fps), timeout=600)
+    if r.returncode != 0:
+        raise RuntimeError(f"实拍裁切失败 {src}: {r.stderr[-300:]}")
+    return out
+
+
 def render(pid: str) -> dict:
     if msg := ShotList.refusal(pid):
         raise RuntimeError(msg)
     cfg = load_config()
     tl = timeline.build_timeline(pid)
+    if placed := ShotList.placement_problems(tl):
+        raise RuntimeError("实拍镜不能剪入时间轴，不进渲染：" + "；".join(placed))
     pdir = store.project_dir(pid)
     out_dir = pdir / "output"
     clips_dir = pdir / "clips"
     clips_dir.mkdir(exist_ok=True)
 
     # 1) 逐段视频片段（断点续跑：卡或动效参数变了就重渲）
+    #    没有实拍时仍是一段卡片一段成片。有实拍时按成片时码硬切进去。
     card_entries = _load_cards(pid)
     cards = {c["id"]: c["png"] for c in card_entries}
     focuses = {c["id"]: tuple(c["focus"]) for c in card_entries if c.get("focus")}
     clip_paths = []
-    for seg in tl["segments"]:
-        kind = "hook" if seg["kind"] == "hook" else \
-            "outro" if seg["kind"] == "outro" else "item"
-        focus = focuses.get(seg["id"])
-        if kind == "item":
-            kind = "map" if focus else "headline"
-        cp = clips_dir / f"{seg['id']}.mp4"
-        stale = cp.exists() and Path(cards[seg["id"]]).stat().st_mtime > cp.stat().st_mtime
-        if not cp.exists() or stale:          # 卡片更新过 → 片段作废重渲
-            if cp.exists():
-                cp.unlink()
-            _render_clip(cards[seg["id"]], seg["length"], cp, tl["fps"],
-                         kind=kind, focus=focus)
-        clip_paths.append(cp)
+    if not tl.get("live_cuts"):
+        for seg in tl["segments"]:
+            kind = "hook" if seg["kind"] == "hook" else \
+                "outro" if seg["kind"] == "outro" else "item"
+            focus = focuses.get(seg["id"])
+            if kind == "item":
+                kind = "map" if focus else "headline"
+            cp = clips_dir / f"{seg['id']}.mp4"
+            stale = cp.exists() and Path(cards[seg["id"]]).stat().st_mtime > cp.stat().st_mtime
+            if not cp.exists() or stale:          # 卡片更新过 → 片段作废重渲
+                if cp.exists():
+                    cp.unlink()
+                _render_clip(cards[seg["id"]], seg["length"], cp, tl["fps"],
+                             kind=kind, focus=focus)
+            clip_paths.append(cp)
+    else:
+        for i, piece in enumerate(ShotList.visual_pieces(tl)):
+            seg = piece["seg"]
+            if piece["kind"] == "live":
+                cp = clips_dir / f"live-{piece['no']:02d}-{i:02d}.mp4"
+                if cp.exists():
+                    cp.unlink()
+                _render_live(piece["path"], piece["src_in"], piece["length"],
+                             cp, tl["fps"])
+            else:
+                kind = "hook" if seg["kind"] == "hook" else \
+                    "outro" if seg["kind"] == "outro" else "item"
+                focus = focuses.get(seg["id"])
+                if kind == "item":
+                    kind = "map" if focus else "headline"
+                cp = clips_dir / f"{seg['id']}-{i:02d}.mp4"
+                if cp.exists():
+                    cp.unlink()
+                _render_clip(cards[seg["id"]], piece["length"], cp, tl["fps"],
+                             kind=kind, focus=focus)
+            clip_paths.append(cp)
 
     # 2) 顺序拼接
     lst = clips_dir / "concat.txt"

@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
-"""时间轴：配音实测时长 + 卡片 → timeline.json（渲染与字幕的唯一定位依据）。"""
+"""时间轴：配音实测时长 + 卡片 → timeline.json（渲染与字幕的唯一定位依据）。
+
+已过许可门的实拍记在 live_cuts 里，由渲染按成片时码嵌进这条时间轴。
+没有实拍时，时间轴仍只由配音和卡片决定。
+"""
 from src import scriptgen, store
 from src.config import load_config
 from src.jsonio import load_json, save_json
+from src.shotlist import ShotList
 
 
 def build_timeline(pid: str) -> dict:
@@ -26,7 +31,8 @@ def build_timeline(pid: str) -> dict:
                      "card": seg.get("card", {}).get("type", "headline")})
         t += length
     tl = {"segments": segs, "total_s": round(t, 2),
-          "fps": vcfg["fps"], "width": vcfg["width"], "height": vcfg["height"]}
+          "fps": vcfg["fps"], "width": vcfg["width"], "height": vcfg["height"],
+          "live_cuts": ShotList.live_cuts(pid)}
     save_json(tl, store.project_dir(pid) / "timeline.json")
     return tl
 
