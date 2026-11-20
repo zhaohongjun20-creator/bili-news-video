@@ -3,6 +3,7 @@
 
 目录内容：
     briefing.md      Grok 简报原文（人工粘贴，留档）
+    分镜清单.md      可选。有则渲染前走许可门（src/shotlist.py）
     briefing.json    结构化简报（ingest 输出）
     script.json      逐字稿 + 每段卡片字段（scriptgen 输出）
     hammer.json      锤稿检查结果（redline/lint 输出）
