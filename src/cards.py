@@ -113,6 +113,55 @@ def _wrap(text: str, f: ImageFont.FreeTypeFont, draw, max_w: int,
     return lines
 
 
+def _wrap_all(text: str, f, draw, max_w: int) -> list[str]:
+    """按实测字宽折行，不丢掉任何一个字。"""
+    lines, cur = [], ""
+    for ch in text:
+        if cur and (draw.textlength(cur + ch, font=f) > max_w or len(cur) >= 42):
+            lines.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _draw_block(d, texts: list[str], x: int, y: int, max_w: int, max_h: int,
+                start: int, color, bold: bool = True, min_size: int = 22) -> int:
+    """缩小字号直到每行都在框内，且原文一个字都不丢。"""
+    lines_in = [t for t in texts if t]
+    size = start
+    while size >= min_size:
+        font = _font(size, bold)
+        wrapped: list[str] = []
+        ok = True
+        for text in lines_in:
+            parts = _wrap_all(text, font, d, max_w)
+            if "".join(parts) != text:
+                ok = False
+                break
+            if any(d.textlength(p, font=font) > max_w + 1 for p in parts):
+                ok = False
+                break
+            wrapped.extend(parts)
+        line_h = max(int(size * 1.35), size + 8)
+        if ok and wrapped and len(wrapped) * line_h <= max_h:
+            yy = y
+            for ln in wrapped:
+                d.text((x, yy), ln, font=font, fill=color)
+                yy += line_h
+            return yy
+        size -= 2
+    font = _font(min_size, bold)
+    yy = y
+    for text in lines_in:
+        for ln in _wrap_all(text, font, d, max_w):
+            d.text((x, yy), ln, font=font, fill=color)
+            yy += max(int(min_size * 1.35), min_size + 8)
+    return yy
+
+
 def _chrome(img: Image.Image, d: ImageDraw.ImageDraw, badge: str = "",
             label: str = "") -> None:
     """公共装饰：顶部台标条 + 徽标 + 右下角栏目名。"""
@@ -157,6 +206,11 @@ def _draw_hook(img, d, seg, meta) -> None:
 
 def _draw_headline(img, d, seg, meta) -> None:
     card = seg.get("card", {})
+    full = [ln for ln in (card.get("full") or []) if ln]
+    if full:
+        d.rectangle([120, 280, 196, 360], fill=ACCENT)
+        _draw_block(d, full, 240, 280, W - 480, 680, 64, INK, bold=True)
+        return
     headline = card.get("headline") or seg["narration"][:16]
     d.rectangle([120, 300, 220, 420], fill=ACCENT)
     f = _fit(d, headline, 96, W - 300, bold=True)
@@ -456,9 +510,62 @@ def _confirmed_place(pid: str, seg_id: str) -> tuple[dict | None, dict | None]:
     return resolve_place(chosen, ""), rec
 
 
+class IndoPacificMap:
+    """印太范围示意。陆海来自已入库的 Natural Earth 50m，不标海域名。"""
+
+    VIEW = (25.0, -48.0, 175.0, 48.0)   # 印度洋到西太平洋，不跨日界线
+
+    @staticmethod
+    def paint(img, box: tuple) -> None:
+        """把国界画进 box。先画在画布上再贴回，越界的陆地不会盖住标题。"""
+        x0, y0, x1, y1 = box
+        mw, mh = x1 - x0, y1 - y0
+        canvas = Image.new("RGB", (mw, mh), SEA)
+        draw = ImageDraw.Draw(canvas)
+        view = IndoPacificMap.VIEW
+        inner = (0, 0, mw, mh)
+        for feat in _load_world():
+            for poly in feat["geometry"]["coordinates"]:
+                for ring in poly:
+                    lons = [pt[0] for pt in ring]
+                    lats = [pt[1] for pt in ring]
+                    if max(lons) - min(lons) > 180:
+                        continue
+                    if (max(lons) < view[0] or min(lons) > view[2]
+                            or max(lats) < view[1] or min(lats) > view[3]):
+                        continue
+                    pts = [_proj_view(pt, view, inner) for pt in ring]
+                    draw.polygon(pts, fill=LAND, outline=BORDER)
+        img.paste(canvas, (x0, y0))
+
+    @staticmethod
+    def draw(img, d, seg, meta) -> None:
+        """地图卡：底图加合作名称；后一拍才加演习安排，用语沿用字幕。"""
+        card = seg.get("card", {})
+        phase = card.get("phase") or "name"
+        title = card.get("headline") or "印太海上监视合作"
+        d.text((140, 200), title, font=_fit(d, title, 56, 1500, bold=True), fill=INK)
+        text_w = 560 if phase == "exercise" else 0
+        box = (100, 300, W - 100 - text_w, H - 80)
+        IndoPacificMap.paint(img, box)
+        d.rectangle(list(box), outline=BORDER, width=2)
+        credit = "Made with Natural Earth"
+        d.text((box[0] + 16, box[3] - 40), credit, font=_font(26), fill=DIM)
+        if phase != "exercise":
+            return
+        lines = [ln for ln in (card.get("lines") or []) if ln]
+        if card.get("source"):
+            lines = lines + [card["source"]]
+        _draw_block(d, lines, box[2] + 28, 320, text_w - 48, 620, 36, INK,
+                    bold=True, min_size=22)
+
+
 def _draw_map(img, d, seg, meta) -> None:
     """真实底图卡：Natural Earth 50m 国界，焦点国家红色高亮，外围行为者
     右栏标签+细线指向焦点。数据缺失时退回棋盘格示意卡（老版）。"""
+    if seg.get("card", {}).get("extent") == "印太":
+        IndoPacificMap.draw(img, d, seg, meta)
+        return
     feats = _load_geo()
     card = seg.get("card", {})
     headline = card.get("headline") or "巴尔干动向"
@@ -712,18 +819,31 @@ def render_cards(pid: str) -> list[dict]:
                            if first_item else ""))
     out = []
     for seg in script["segments"]:
-        img = Image.new("RGB", (W, H), BG)
-        d = ImageDraw.Draw(img)
-        # 每张卡一层淡面板底（四周 80px 边框感），避免纯背景太空
-        d.rounded_rectangle([80, 180, W - 80, H - 80], 24, fill=BG2)
-        img.paste(Image.new("RGB", (W - 320, H - 420), BG), (160, 260))
-        _chrome(img, d, badge=seg.get("card", {}).get("badge", ""),
-                label=script["meta"].get("show_label", ""))
-        ret = _DRAWERS.get(seg["card"].get("type", "headline"), _draw_headline)(
-            img, d, seg, meta)
-        png = cards_dir / f"{seg['id']}.png"
-        img.save(png)
-        entry = {"id": seg["id"], "png": str(png)}
+        phases = seg.get("card", {}).get("phases") or [None]
+        spans = []
+        entry_png = None
+        ret = None
+        for i, ph in enumerate(phases):
+            img = Image.new("RGB", (W, H), BG)
+            d = ImageDraw.Draw(img)
+            # 每张卡一层淡面板底（四周 80px 边框感），避免纯背景太空
+            d.rounded_rectangle([80, 180, W - 80, H - 80], 24, fill=BG2)
+            img.paste(Image.new("RGB", (W - 320, H - 420), BG), (160, 260))
+            _chrome(img, d, badge=seg.get("card", {}).get("badge", ""),
+                    label=script["meta"].get("show_label", ""))
+            drawn = seg
+            if ph:
+                drawn = {**seg, "card": {**seg["card"], "phase": ph["phase"]}}
+            ret = _DRAWERS.get(seg["card"].get("type", "headline"), _draw_headline)(
+                img, d, drawn, meta)
+            png = cards_dir / (f"{seg['id']}.png" if not ph else f"{seg['id']}-p{i}.png")
+            img.save(png)
+            entry_png = entry_png or png
+            if ph:
+                spans.append({"png": str(png), "length": ph["length"]})
+        entry = {"id": seg["id"], "png": str(entry_png)}
+        if spans:
+            entry["spans"] = spans
         if isinstance(ret, tuple) and len(ret) == 2:
             entry["focus"] = ret              # 动态地图焦点比例 → 渲染推向该点
         out.append(entry)
@@ -766,6 +886,22 @@ def _update_map_confirm(pid: str, script: dict) -> None:
     save_json(mc, mc_path)
 
 
+def cover_lines(script: dict) -> tuple[str, str]:
+    """封面两行字。锁定了事实副题时不用条目标题当角标。"""
+    meta = script.get("meta") or {}
+    title = (meta.get("cover_title") or script.get("title") or "").strip()
+    sub = (meta.get("cover_sub") or "").strip()
+    if sub:
+        return title, sub
+    first = next((s for s in script.get("segments", []) if s.get("kind") == "item"), None)
+    hl = ""
+    if first:
+        hl = ((first.get("card") or {}).get("headline") or "").strip()
+        if hl in title:
+            hl = ""
+    return title, hl
+
+
 def make_cover(pid: str) -> Path:
     """独立 16:9 封面：主标题大字 + 钩子副题 + 地球仪，不是片头卡缩放。"""
     script = scriptgen.load_script(pid)
@@ -776,25 +912,32 @@ def make_cover(pid: str) -> Path:
     d.rectangle([0, 0, W, 16], fill=ACCENT)
     label = meta.get("show_label") or load_config()["show"]["name"]
     d.text((140, 120), f"{label} · {meta['date']}", font=_font(44, True), fill=ACCENT)
-    title = script.get("title", "")
-    f = _fit(d, title, 84, 1060, bold=True)
-    y = 230
-    for ln in _wrap(title, f, d, 1060, max_lines=3):
-        d.text((140, y), ln, font=f, fill=INK)
-        y += int(f.size * 1.28)
-    first_item = next((s for s in script["segments"] if s.get("kind") == "item"), None)
-    if first_item:
-        hl = first_item.get("card", {}).get("headline", "")
-        if hl and hl not in title:
-            fh2 = _fit(d, hl, 44, 1000)
-            d.text((140, y + 26), "· " + hl, font=fh2, fill=GOLD)
+    title, second = cover_lines(script)
+    if meta.get("cover_sub"):
+        # 主标题按实测字宽缩成一行，避免最后一个字单独掉到下一行。
+        f = _fit(d, title, 72, 1640, bold=True)
+        d.text((140, 280), title, font=f, fill=INK)
+        if second:
+            fs = _fit(d, second, 42, 1640)
+            d.text((140, 280 + int(f.size * 1.5)), second, font=fs, fill=GOLD)
+    else:
+        f = _fit(d, title, 84, 1060, bold=True)
+        y = 230
+        for ln in _wrap(title, f, d, 1060, max_lines=3):
+            d.text((140, y), ln, font=f, fill=INK)
+            y += int(f.size * 1.28)
+        if second:
+            fh2 = _fit(d, second, 44, 1000)
+            d.text((140, y + 26), "· " + second, font=fh2, fill=GOLD)
+        first_item = next((s for s in script["segments"]
+                           if s.get("kind") == "item"), None)
+        place = resolve_place(first_item.get("card", {}).get("headline", "")
+                              if first_item else "",
+                              first_item.get("narration", "") if first_item else "")
+        if place and _load_world():
+            _draw_globe(d, place, R=320, cx=1480, cy=610,
+                        focus_iso=place.get("iso") or "")
     d.text((140, 910), "只讲发生了什么 · 各方怎么说　|　不站队 · 不评论 · 不预测",
            font=_font(34), fill=DIM)
-    place = resolve_place(first_item.get("card", {}).get("headline", "")
-                          if first_item else "",
-                          first_item.get("narration", "") if first_item else "")
-    if place and _load_world():
-        _draw_globe(d, place, R=320, cx=1480, cy=610,
-                    focus_iso=place.get("iso") or "")
     img.resize((1280, 720)).save(out, quality=90)
     return out

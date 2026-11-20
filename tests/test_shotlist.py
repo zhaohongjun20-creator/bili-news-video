@@ -150,7 +150,39 @@ def test_specified_cover_rejects_ungated_shot():
 
 @pytest.mark.parametrize("cover_type", ["纯文字封面", "图形设计封面"])
 def test_unspecified_cover_types_pass(cover_type):
-    assert ShotList.problems(_doc([_map()], cover_type=cover_type)) == []
+    text = _doc([_map()], cover_type=cover_type)
+    assert ShotList.problems(text) == []
+    assert ShotList.parse(text)["cover"]["封面类型"] == cover_type
+
+
+def test_editor_cover_line_selects_graphic_cover():
+    """模板那一行被填成「封面类型：图形设计封面」时，第一个冒号不再把类型吃掉。"""
+    text = _doc([_map()], cover_type="").replace(
+        "- 封面类型：\n",
+        "- 若不指定：封面类型：图形设计封面。剪辑师1不必另找静帧，"
+        "也不要使用未过许可门的图，不要从 V1、V2 抽封面静帧。\n",
+    )
+    cover_part = text.split("## 2", 1)[0]
+    assert "- 封面类型：" not in cover_part
+    assert ShotList.problems(text) == []
+    assert ShotList.parse(text)["cover"]["封面类型"] == "图形设计封面"
+
+
+def test_template_cover_instruction_does_not_choose():
+    text = _doc([_map()], cover_type="").replace(
+        "- 封面类型：\n",
+        "- 若不指定：封面类型必须二选一，写明「纯文字封面」或「图形设计封面」。"
+        "剪辑师1不必另找静帧，也不要使用未过许可门的图。\n",
+    )
+    problems = ShotList.problems(text)
+    assert any("纯文字封面" in p and "图形设计封面" in p for p in problems)
+    assert ShotList.parse(text)["cover"].get("封面类型", "") not in ShotList.COVER_TYPES
+    both = _doc([_map()], cover_type="").replace(
+        "- 封面类型：\n",
+        "- 若不指定：封面类型：纯文字封面或图形设计封面。\n",
+    )
+    assert any("纯文字封面" in p and "图形设计封面" in p
+               for p in ShotList.problems(both))
 
 
 def test_unspecified_cover_rejects_other_label():

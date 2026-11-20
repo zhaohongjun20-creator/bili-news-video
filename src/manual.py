@@ -109,6 +109,8 @@ def parse_script(md_path: Path, date: str = "", label: str = "") -> dict:
                         "outro" if kind == "outro" else card["type"])
         segs.append({"kind": kind, "narration": narration, "item_ref": 0,
                      "card": card})
+    for i, seg in enumerate(segs, 1):
+        seg["id"] = f"seg{i:02d}"
     title = mt.group(1).strip() if mt else f"军事快讯 {date}"
     return {"title": title,
             "meta": {"date": date, "mode": "manual",

@@ -774,6 +774,25 @@ def test_manual_script_parse():
     assert "匿名信源" in item["narration"]
 
 
+def test_manual_block_is_a_refusal_not_a_crash(tmp_path, monkeypatch):
+    """人工稿段落没有 id 时，来源缺失要拒稿，不能在锤稿里 KeyError。"""
+    from src import hammer, manual, store
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    md = tmp_path / "s.md"
+    md.write_text(
+        "**主标题**：测试\n\n"
+        "**【00:00–00:10｜开场钩子】**\n\n"
+        "11月17日发生了一件事。\n\n"
+        "**【00:10–00:20｜正文】**\n\n"
+        "港口起了大火，事态非常严重。\n",
+        encoding="utf-8")
+    pid = manual.ingest_script(md, date="2026-11-17", label="时政快讯")
+    report = hammer.hammer(pid)
+    assert report["status"] == "rejected"
+    assert any(i["rule"] == "RL-SRC-M" and i["level"] == "block"
+               for i in report["issues"])
+
+
 def test_manual_script_rejects_wrong_format():
     import tempfile
     from pathlib import Path as _P
@@ -1264,6 +1283,30 @@ def test_manual_sources_precision():
     issues = factcheck.check_manual_sources(script)
     blocked = {i["seg"] for i in issues if i["rule"] == "RL-SRC-M"}
     assert blocked == {"seg02", "seg04"}              # seg03 有「据…报道」通过
+
+
+def test_manual_sources_named_document_or_remarks():
+    """锁定清单里已点名新闻稿或开场讲话的句子算有来源；光写欢迎或说不算。"""
+    from src import factcheck
+    sourced = [
+        "联合新闻稿写明：今年是四方机制重启近十年，也是已故日本首相安倍晋三于 2016 年提出「自由开放的印太」愿景十周年。",
+        "联合新闻稿欢迎「印太海上监视合作」，以加强信息共享和海上态势感知；并写明 2027 年四国各自的 P-8 和 P-3C 巡逻机定于首次在四方框架下进行海上演习。",
+        "澳大利亚总理阿尔巴尼斯在峰会开场讲话中说：四国合作对印太的和平、安全、稳定与繁荣很重要。",
+        "双方公报写明了会谈日期。",
+    ]
+    unsourced = [
+        "港口起了大火，事态非常严重，情况仍在继续发展变化。",
+        "欢迎大家继续关注后续安排。",
+        "他说情况还在变化，需要再看看。",
+        "部分地区发生变化，事态仍在发展。",
+    ]
+    script = {"segments": [
+        {"id": f"s{i}", "kind": "item", "narration": text}
+        for i, text in enumerate(sourced + unsourced)
+    ]}
+    blocked = {i["seg"] for i in factcheck.check_manual_sources(script)
+               if i["rule"] == "RL-SRC-M"}
+    assert blocked == {f"s{i}" for i in range(len(sourced), len(sourced) + len(unsourced))}
 
 
 def test_detector_parsers():

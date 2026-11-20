@@ -92,6 +92,82 @@ def _synth_cosy_batch(segs: list, audio_dir: Path, cosy_cfg: dict) -> list[Path]
     return outs
 
 
+def _speak(text: str, mp3: Path, vcfg: dict, key: str) -> str:
+    errs = []
+    try:
+        _synth_edge(text, mp3, vcfg["edge_voice"], vcfg.get("edge_rate", "+0%"))
+        return "edge"
+    except Exception as e:
+        errs.append(f"edge: {type(e).__name__}: {str(e)[:80]}")
+        if key:
+            try:
+                _synth_zhipu(text, mp3, key, vcfg.get("zhipu_model", "cogtts"),
+                             vcfg.get("zhipu_voice", "tongtong"))
+                return "zhipu"
+            except Exception as e2:
+                errs.append(f"zhipu: {type(e2).__name__}: {str(e2)[:80]}")
+    raise RuntimeError(f"配音失败：{'；'.join(errs)}")
+
+
+def _fit_window(src: Path, dst: Path, window: float) -> float:
+    """一句配音长过这一拍时只加速，不改字。加速上限 2 倍。"""
+    dur = ffmpeg.probe_duration(src)
+    limit = max(0.35, window - 0.05)
+    if dur <= limit + 1e-3:
+        if src.resolve() != dst.resolve():
+            dst.write_bytes(src.read_bytes())
+        return dur
+    tempo = min(2.0, dur / limit)
+    r = ffmpeg.run([ffmpeg.ffmpeg_exe(), "-y", "-i", str(src),
+                    "-filter:a", f"atempo={tempo:.4f}",
+                    "-ar", "44100", "-ac", "1", str(dst)], timeout=120)
+    if r.returncode != 0 or not dst.exists() or dst.stat().st_size < 1000:
+        raise RuntimeError(f"口播压进时码失败: {r.stderr[:150]}")
+    return ffmpeg.probe_duration(dst)
+
+
+def _concat_wavs(paths: list[Path], dst: Path) -> float:
+    if len(paths) == 1:
+        if paths[0].resolve() != dst.resolve():
+            dst.write_bytes(paths[0].read_bytes())
+        return ffmpeg.probe_duration(dst)
+    lst = dst.with_suffix(".concat.txt")
+    lst.write_text("".join(f"file '{p.as_posix()}'\n" for p in paths),
+                   encoding="utf-8")
+    r = ffmpeg.run([ffmpeg.ffmpeg_exe(), "-y", "-f", "concat", "-safe", "0",
+                    "-i", str(lst), "-c", "copy", str(dst)], timeout=120)
+    if r.returncode != 0 or not dst.exists():
+        raise RuntimeError(f"口播拼接失败: {r.stderr[:150]}")
+    return ffmpeg.probe_duration(dst)
+
+
+def _voice_locked(seg: dict, audio_dir: Path, vcfg: dict, key: str,
+                  backend: str) -> tuple[dict, str]:
+    """按字幕拍合成。duration 只计说话，不含拍与拍之间的静音。"""
+    cues_out = []
+    pieces = []
+    for i, cue in enumerate(seg["cues"]):
+        h = hashlib.md5(cue["text"].encode("utf-8")).hexdigest()[:8]
+        fitted = audio_dir / f"{seg['id']}_c{i}_{h}.wav"
+        window = float(cue["end"]) - float(cue["start"])
+        if not fitted.exists() or fitted.stat().st_size < 1000:
+            raw = audio_dir / f"{seg['id']}_c{i}_{h}.raw.wav"
+            mp3 = audio_dir / f"{seg['id']}_c{i}_{h}.mp3"
+            if not raw.exists():
+                if not mp3.exists():
+                    backend = _speak(cue["text"], mp3, vcfg, key) or backend
+                _to_wav(mp3, raw)
+            _fit_window(raw, fitted, window)
+        dur = round(ffmpeg.probe_duration(fitted), 3)
+        cues_out.append({"at": float(cue["start"]), "wav": str(fitted),
+                         "duration": dur})
+        pieces.append(fitted)
+    wav = audio_dir / f"{_audio_key(seg)}.wav"
+    duration = round(_concat_wavs(pieces, wav), 3)
+    return ({"id": seg["id"], "wav": str(wav), "duration": duration,
+             "cues": cues_out}, backend or "edge")
+
+
 def voice(pid: str) -> dict:
     """全稿配音。返回 {segments: [{id, wav, duration}], backend}。"""
     script = scriptgen.load_script(pid)
@@ -101,8 +177,9 @@ def voice(pid: str) -> dict:
     audio_dir.mkdir(exist_ok=True)
     key = api_keys()["zhipu"]
     backend = ""
+    has_cues = any(s.get("cues") for s in script["segments"])
 
-    if vcfg.get("cosy", {}).get("enable") and cosy_ready():
+    if (not has_cues) and vcfg.get("cosy", {}).get("enable") and cosy_ready():
         try:
             _synth_cosy_batch(script["segments"], audio_dir, vcfg["cosy"])
             backend = "cosy"
@@ -110,6 +187,8 @@ def voice(pid: str) -> dict:
             backend = ""                                  # 降级逐段链路
 
     for s in script["segments"]:
+        if s.get("cues"):
+            continue
         wav = audio_dir / f"{_audio_key(s)}.wav"
         if wav.exists():
             continue
@@ -142,6 +221,10 @@ def voice(pid: str) -> dict:
 
     segs_out = []
     for s in script["segments"]:
+        if s.get("cues"):
+            item, backend = _voice_locked(s, audio_dir, vcfg, key, backend)
+            segs_out.append(item)
+            continue
         wav = audio_dir / f"{_audio_key(s)}.wav"
         segs_out.append({"id": s["id"], "wav": str(wav),
                          "duration": round(ffmpeg.probe_duration(wav), 3)})
