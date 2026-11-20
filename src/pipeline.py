@@ -5,6 +5,7 @@
 锤稿拒稿（rejected）即刻停线——"产线可以断，烂片不能发"。
 """
 from src import cards, hammer, narrator, qc as qc_mod, renderer, scriptgen, store
+from src.shotlist import ShotList
 
 
 class PipelineError(RuntimeError):
@@ -33,6 +34,8 @@ def make(pid: str, offline: bool = False) -> dict:
         narrator.voice(pid)
         steps.append("voice")
     if not store.stage_done(pid, "render"):
+        if msg := ShotList.refusal(pid):
+            raise PipelineError(msg)
         cards.render_cards(pid)
         renderer.render(pid)
         steps.append("render")

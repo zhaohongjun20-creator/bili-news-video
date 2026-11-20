@@ -7,12 +7,14 @@
     item(其他) 1.08 定zoom短促滑入（0.6s），条目间硬切
     outro    卡住不动，仅收尾 0.4s 淡黑
 字幕：54 号、贴近底边安全区（避开地图注记），行时长按字数加权分配。
+项目目录若有分镜清单.md，许可门不过则在任何编码之前拒绝。
 """
 from pathlib import Path
 
 from src import ffmpeg, scriptgen, store, timeline
 from src.config import load_config
 from src.jsonio import save_json
+from src.shotlist import ShotList
 
 ASS_HEADER = """[Script Info]
 ScriptType: v4.00+
@@ -108,6 +110,8 @@ def _render_clip(png: str, length: float, out: Path, fps: int,
 
 
 def render(pid: str) -> dict:
+    if msg := ShotList.refusal(pid):
+        raise RuntimeError(msg)
     cfg = load_config()
     tl = timeline.build_timeline(pid)
     pdir = store.project_dir(pid)
