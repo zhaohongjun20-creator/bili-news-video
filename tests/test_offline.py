@@ -774,6 +774,25 @@ def test_manual_script_parse():
     assert "匿名信源" in item["narration"]
 
 
+def test_manual_block_is_a_refusal_not_a_crash(tmp_path, monkeypatch):
+    """人工稿段落没有 id 时，来源缺失要拒稿，不能在锤稿里 KeyError。"""
+    from src import hammer, manual, store
+    monkeypatch.setattr(store, "ROOT", tmp_path)
+    md = tmp_path / "s.md"
+    md.write_text(
+        "**主标题**：测试\n\n"
+        "**【00:00–00:10｜开场钩子】**\n\n"
+        "11月17日发生了一件事。\n\n"
+        "**【00:10–00:20｜正文】**\n\n"
+        "联合新闻稿写明了后续安排。\n",
+        encoding="utf-8")
+    pid = manual.ingest_script(md, date="2026-11-17", label="时政快讯")
+    report = hammer.hammer(pid)
+    assert report["status"] == "rejected"
+    assert any(i["rule"] == "RL-SRC-M" and i["level"] == "block"
+               for i in report["issues"])
+
+
 def test_manual_script_rejects_wrong_format():
     import tempfile
     from pathlib import Path as _P

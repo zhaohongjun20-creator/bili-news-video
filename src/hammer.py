@@ -44,6 +44,8 @@ def _check_segment(seg: dict, item_sources: dict, manual: bool = False) -> list[
 
 def hammer(pid: str) -> dict:
     script = scriptgen.load_script(pid)
+    for i, seg in enumerate(script.get("segments") or [], 1):
+        seg.setdefault("id", f"seg{i:02d}")
     brief = load_json(store.project_dir(pid) / "briefing.json") or {}
     refs = scriptgen.valid_refs(brief)   # 有效条目 ref 集合（与 scriptgen 同一定义）
     items = {i + 1: it for i, it in enumerate(brief.get("items", []))}
