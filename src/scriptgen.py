@@ -6,7 +6,9 @@
 口播语速按 4.5 字/秒估算段时长，配音后以实测音频时长为准。
 """
 import datetime as _dt
+import json
 import re
+from pathlib import Path
 
 from src import ingest, redlines, store
 from src.config import api_keys, load_config
@@ -247,37 +249,293 @@ def load_script(pid: str) -> dict:
 
 # 锤稿通过后供渲染使用的小工具
 def narration_lines(narration: str, width: int = 16) -> list[str]:
-    """口播按 ≤width 字切字幕行。
+    """口播切字幕行。有词级时间时按词界切，否则断在标点或虚词前。"""
+    return Subtitles.lines(narration, width)
 
-    标点优先断行；剩下 1 字就回并上一行，避免「件。」「击。」单独成行。
-    空句（只有标点）丢弃。
+
+class Subtitles:
+    """字幕行与出现时间。
+
+    口播文本只用稿子里已经锁住的句子。出现时间只用配音写进 voice.json 的
+    edge-tts WordBoundary（秒）。没有这份词级时间时，锁定字幕拍仍用拍上的时码；
+    其余才按字数分整段音频窗口。不另造一条时钟。
+
+    断行只发生在标点或词与词之间。一个词（例如「举行」「发表」）不拆到两行。
     """
-    import re as _re
-    parts = [p for p in _re.split(r"(?<=[。！？；：,.])\s*", narration) if p]
-    lines: list[str] = []
-    for p in parts:
-        while len(p) > width:
-            cut = width
-            for j in range(min(width, len(p) - 1), max(1, int(width * 0.6)), -1):
-                if p[j - 1] in "，。！？；：、,":
-                    cut = j
+
+    WIDTH = 16
+    TIMING = "edge-tts-word"
+    _PUNCT = "。！？；：，、,.:;!?\"“”''‘’（）()【】[]《》<>…—～~-—"
+    _SENTENCE = "。！？；：.!?"
+    _CLAUSE = "，。！？；：、,"
+    _PARTICLE = "在与和及并而对从为把被将向"
+
+    @staticmethod
+    def sidecar(audio) -> Path:
+        return Path(str(audio) + ".words.json")
+
+    @staticmethod
+    def read_words(audio) -> list:
+        path = Subtitles.sidecar(audio)
+        if not path.is_file():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        return data if isinstance(data, list) else []
+
+    @staticmethod
+    def write_words(audio, words: list) -> None:
+        Subtitles.sidecar(audio).write_text(
+            json.dumps(words, ensure_ascii=False), encoding="utf-8")
+
+    @staticmethod
+    def words_from_jsonl(text: str) -> list:
+        """edge-tts metadata 一行一个 WordBoundary。offset 单位是 100 纳秒。"""
+        words = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            msg = json.loads(line)
+            if msg.get("type") != "WordBoundary":
+                continue
+            token = str(msg.get("text") or "")
+            if not token.strip():
+                continue
+            words.append({
+                "text": token,
+                "offset": round(float(msg["offset"]) / 10_000_000, 4),
+                "duration": round(float(msg["duration"]) / 10_000_000, 4),
+            })
+        return words
+
+    @staticmethod
+    def scale(words: list, factor: float) -> list:
+        """同一条词级时钟乘上已经施加在音频上的倍率（atempo）。"""
+        if not words:
+            return []
+        factor = float(factor)
+        if factor <= 0:
+            return []
+        return [{
+            "text": w["text"],
+            "offset": round(float(w["offset"]) * factor, 4),
+            "duration": round(float(w["duration"]) * factor, 4),
+        } for w in words]
+
+    @staticmethod
+    def _sig(text: str) -> str:
+        return "".join(ch for ch in text
+                       if not ch.isspace() and ch not in Subtitles._PUNCT)
+
+    @staticmethod
+    def align(text: str, words: list) -> list[dict] | None:
+        """把词级时间贴回原文。对不上就返回 None，调用方不得自行补时间。"""
+        if not text or not words:
+            return None
+        pieces = []
+        for w in words:
+            sig = Subtitles._sig(str(w.get("text") or ""))
+            if sig:
+                pieces.append((w, sig))
+        if not pieces or "".join(sig for _, sig in pieces) != Subtitles._sig(text):
+            return None
+        i = 0
+        located = []
+        for w, sig in pieces:
+            consumed = 0
+            start = None
+            while consumed < len(sig) and i < len(text):
+                if text[i].isspace() or text[i] in Subtitles._PUNCT:
+                    i += 1
+                    continue
+                if text[i] != sig[consumed]:
+                    return None
+                if start is None:
+                    start = i
+                i += 1
+                consumed += 1
+            if consumed != len(sig) or start is None:
+                return None
+            located.append({
+                "sig_start": start,
+                "offset": float(w["offset"]),
+                "duration": float(w["duration"]),
+            })
+        spans = []
+        for k, loc in enumerate(located):
+            a = 0 if k == 0 else loc["sig_start"]
+            b = located[k + 1]["sig_start"] if k + 1 < len(located) else len(text)
+            spans.append({
+                "slice": text[a:b],
+                "offset": loc["offset"],
+                "duration": loc["duration"],
+            })
+        if "".join(s["slice"] for s in spans) != text:
+            return None
+        return spans
+
+    @staticmethod
+    def _len(spans: list[dict]) -> int:
+        return len("".join(s["slice"] for s in spans).strip())
+
+    @staticmethod
+    def _sentence_end(slice_: str) -> bool:
+        return slice_.rstrip().endswith(tuple(Subtitles._SENTENCE))
+
+    @staticmethod
+    def _lone_particle(slice_: str) -> bool:
+        core = slice_.strip().strip(Subtitles._CLAUSE + Subtitles._SENTENCE)
+        return len(core) == 1 and core in Subtitles._PARTICLE
+
+    @staticmethod
+    def wrap_spans(spans: list[dict], width: int) -> list[list[dict]]:
+        """装满一行再断。断点在下一个词之前；行尾若只剩一个虚词，虚词跟下一行。"""
+        groups: list[list[dict]] = []
+        i, n = 0, len(spans)
+        while i < n:
+            best = i
+            closed = False
+            k = i
+            while k < n:
+                if best > i and Subtitles._len(spans[i:k + 1]) > width:
                     break
-            lines.append(p[:cut].strip())
-            p = p[cut:]
-        if p.strip():
-            lines.append(p.strip())
-    # 只剩标点、或去掉标点后只剩 1 个字的行，并回上一行
-    merged: list[str] = []
-    for ln in lines:
-        core = _re.sub(r"[。！？；：，、,.]+", "", ln).strip()
-        if merged and len(core) <= 1:
-            prev = merged[-1]
-            # 上行已有句末标点时不重复追加（防「。。」）
-            if prev.endswith(tuple("。！？；，,")) and ln.startswith(tuple("。！？；，,")):
-                ln = ln.lstrip("。！？；，,")
-            merged[-1] = (prev + ln).strip()
-        elif core:
-            merged.append(ln)
-    # 叠标点兜底清理（源文本里可能本就有「。。」）
-    lines = [_re.sub(r"([。！？；，、,.])\1+", r"\1", ln) for ln in merged]
-    return lines or [narration]
+                best = k + 1
+                if Subtitles._sentence_end(spans[k]["slice"]):
+                    closed = True
+                    break
+                k += 1
+            if (not closed and best < n and best > i + 1
+                    and Subtitles._lone_particle(spans[best - 1]["slice"])):
+                best -= 1
+            if best == i:
+                best = i + 1
+            groups.append(spans[i:best])
+            i = best
+        return groups
+
+    @staticmethod
+    def _clean(line: str) -> str:
+        return re.sub(r"([。！？；，、,.])\1+", r"\1", line.strip())
+
+    @staticmethod
+    def place(text: str, words: list, origin: float,
+              width: int = 16) -> list[tuple[float, float, str]]:
+        """一行的起止 = 该行第一个词的 offset 到最后一个词的结束，再加 origin。"""
+        spans = Subtitles.align(text, words)
+        if not spans:
+            return []
+        groups = Subtitles.wrap_spans(spans, width)
+        timed = []
+        for group in groups:
+            line = Subtitles._clean("".join(s["slice"] for s in group))
+            if not line:
+                continue
+            start = float(origin) + group[0]["offset"]
+            last = group[-1]
+            end = float(origin) + last["offset"] + last["duration"]
+            timed.append([start, end, line])
+        events = []
+        for i, ev in enumerate(timed):
+            if i + 1 < len(timed):
+                ev[1] = timed[i + 1][0]
+            if ev[1] <= ev[0]:
+                ev[1] = ev[0] + 0.01
+            events.append((ev[0], ev[1], ev[2]))
+        return events
+
+    @staticmethod
+    def lines(text: str, width: int = 16, words: list | None = None) -> list[str]:
+        if words:
+            spans = Subtitles.align(text, words)
+            if spans:
+                out = [Subtitles._clean("".join(s["slice"] for s in group))
+                       for group in Subtitles.wrap_spans(spans, width)]
+                out = [ln for ln in out if ln]
+                if out:
+                    return out
+        return Subtitles._plain(text, width)
+
+    @staticmethod
+    def _cut_at(piece: str, width: int) -> int:
+        """无词级时间时的断点：先标点，再虚词前，最后才按字数。"""
+        if len(piece) <= width:
+            return len(piece)
+        hi = min(width, len(piece) - 1)
+        for j in range(hi, 0, -1):
+            if piece[j - 1] in Subtitles._CLAUSE:
+                return j
+        for j in range(hi, 1, -1):
+            if piece[j] in Subtitles._PARTICLE:
+                return j
+        return width
+
+    @staticmethod
+    def _plain(narration: str, width: int) -> list[str]:
+        parts = [p for p in re.split(r"(?<=[。！？；：,.])\s*", narration) if p]
+        lines: list[str] = []
+        for p in parts:
+            while len(p) > width:
+                cut = Subtitles._cut_at(p, width)
+                if cut <= 0 or cut >= len(p):
+                    cut = min(width, len(p))
+                lines.append(p[:cut].strip())
+                p = p[cut:]
+            if p.strip():
+                lines.append(p.strip())
+        merged: list[str] = []
+        for ln in lines:
+            core = re.sub(r"[。！？；：，、,.]+", "", ln).strip()
+            if merged and len(core) <= 1:
+                prev = merged[-1]
+                if prev.endswith(tuple("。！？；，,")) and ln.startswith(tuple("。！？；，,")):
+                    ln = ln.lstrip("。！？；，,")
+                merged[-1] = (prev + ln).strip()
+            elif core:
+                merged.append(ln)
+        lines = [Subtitles._clean(ln) for ln in merged]
+        return lines or [narration]
+
+    @staticmethod
+    def for_segment(narration: str, seg: dict, cues: list | None,
+                    voice_seg: dict | None, width: int = 16
+                    ) -> list[tuple[float, float, str]]:
+        """一段字幕。词级时间对得上原文才用；对不上不估。"""
+        voice_seg = voice_seg or {}
+        if cues:
+            voice_cues = list(voice_seg.get("cues") or [])
+            if (len(voice_cues) == len(cues)
+                    and all(c.get("words") for c in voice_cues)):
+                placed = []
+                for cue, spoken in zip(cues, voice_cues):
+                    origin = float(spoken.get("at", cue["start"]))
+                    chunk = Subtitles.place(cue["text"], spoken["words"], origin, width)
+                    if not chunk:
+                        placed = []
+                        break
+                    placed.extend(chunk)
+                if placed:
+                    return placed
+            return [(float(c["start"]), float(c["end"]), c["text"]) for c in cues]
+
+        words = voice_seg.get("words") or []
+        origin = float(seg["start"]) + float(seg.get("audio_in") or 0)
+        if words:
+            placed = Subtitles.place(narration, words, origin, width)
+            if placed:
+                return placed
+        lines = Subtitles.lines(narration, width)
+        if not lines:
+            return []
+        a0 = origin
+        a1 = a0 + float(seg["audio_duration"])
+        total = sum(max(1, len(ln)) for ln in lines)
+        events = []
+        t = a0
+        for i, ln in enumerate(lines):
+            end = a1 if i == len(lines) - 1 else min(a1, t + (a1 - a0) * len(ln) / total)
+            events.append((t, max(end, t + 0.4), ln))
+            t = end
+        return events

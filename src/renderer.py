@@ -6,7 +6,9 @@
     item(map) 推向焦点标记（焦点比例由 cards.json 提供）
     item(其他) 1.08 定zoom短促滑入（0.6s），条目间硬切
     outro    卡住不动，仅收尾 0.4s 淡黑
-字幕：54 号、贴近底边安全区（避开地图注记），行时长按字数加权分配。
+字幕：54 号、贴近底边安全区（避开地图注记）。有 edge-tts 词级时间时，
+一行从该行第一个词出现到最后一个词说完；没有这份时间时，锁定拍用拍上的
+时码，其余仍按字数分整段音频窗口。
 项目目录若有分镜清单.md，许可门不过则在任何编码之前拒绝。
 没有这份文件时，只有纯卡面、且项目里没有外部实拍，才继续渲染。
 已过门的实拍按成片时码硬切进时间轴；封面仍是设计卡，不从成片或未过门素材抽帧。
@@ -20,6 +22,7 @@ from src.shotlist import ShotList
 
 ASS_HEADER = """[Script Info]
 ScriptType: v4.00+
+WrapStyle: 2
 PlayResX: {w}
 PlayResY: {h}
 
@@ -47,36 +50,29 @@ def _ass_escaped(t: str) -> str:
 
 
 def subtitle_events(narr_map: dict, tl_segs: list,
-                    cues_by_id: dict | None = None) -> list[tuple[float, float, str]]:
-    """字幕事件。有锁定字幕拍时用拍的时码和原文，否则按字数分音频窗口。"""
+                    cues_by_id: dict | None = None,
+                    voice_by_id: dict | None = None) -> list[tuple[float, float, str]]:
+    """字幕事件。词级时间来自 voice.json；没有时沿用拍的时码或字数窗口。"""
     events: list[tuple[float, float, str]] = []
     cues_by_id = cues_by_id or {}
+    voice_by_id = voice_by_id or {}
     for seg in tl_segs:
-        locked = cues_by_id.get(seg["id"])
-        if locked:
-            for cue in locked:
-                events.append((float(cue["start"]), float(cue["end"]), cue["text"]))
-            continue
-        lines = scriptgen.narration_lines(narr_map[seg["id"]])
-        if not lines:
-            continue
-        a0 = seg["start"] + seg["audio_in"]
-        a1 = a0 + seg["audio_duration"]
-        total = sum(max(1, len(ln)) for ln in lines)
-        t = a0
-        for i, ln in enumerate(lines):
-            end = a1 if i == len(lines) - 1 else min(a1, t + (a1 - a0) * len(ln) / total)
-            events.append((t, max(end, t + 0.4), ln))
-            t = end
+        events.extend(scriptgen.Subtitles.for_segment(
+            narr_map.get(seg["id"], ""), seg, cues_by_id.get(seg["id"]),
+            voice_by_id.get(seg["id"])))
     return events
 
 
-def build_ass(pid: str, tl: dict) -> Path:
+def build_ass(pid: str, tl: dict, voice: dict | None = None) -> Path:
     script = scriptgen.load_script(pid)
+    if voice is None:
+        voice = _load_voice(pid)
     nar = {s["id"]: s["narration"] for s in script["segments"]}
     cues = {s["id"]: s["cues"] for s in script["segments"] if s.get("cues")}
+    voice_by_id = {s["id"]: s for s in voice.get("segments", [])}
     lines = [f"Dialogue: 0,{_ts(s0)},{_ts(s1)},News,,0,0,0,,{_ass_escaped(ln)}"
-             for s0, s1, ln in subtitle_events(nar, tl["segments"], cues)]
+             for s0, s1, ln in subtitle_events(
+                 nar, tl["segments"], cues, voice_by_id)]
     ass = store.project_dir(pid) / "output" / "subs.ass"
     ass.parent.mkdir(exist_ok=True)
     ass.write_text(ASS_HEADER.format(w=tl["width"], h=tl["height"],
@@ -261,7 +257,7 @@ def render(pid: str) -> dict:
         n_mix += 1
     filters.append(labels + f"amix=inputs={n_mix}:normalize=0,"
                    "loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
-    ass = build_ass(pid, tl)
+    ass = build_ass(pid, tl, voice)
     final = out_dir / "final.mp4"
     cmd = [ffmpeg.ffmpeg_exe(), "-y", "-i", str(silent), *mix_in,
            "-filter_complex", ";".join(filters),
