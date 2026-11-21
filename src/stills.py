@@ -5,6 +5,8 @@
 Pexels 只作退路，而且只能是空镜：不把库存图说成这一条新闻的现场。
 
 一张静帧要同时有来源 URL、许可名称、条款页、画面署名，缺一项就不用。
+画面署名先写该档自己的作品名和作者，再写许可。不把 Wikimedia Commons 或 Pexels 写成作者。
+作品名只取文件元数据里的题名；没有作品名或作者，这张图就不用。Pexels 没有作品名，署名写摄影师和许可。
 许可名称和条款页沿用分镜清单的许可门（ShotList._license_ok），不另开后门。
 NC、ND、来源不在允许名单、作者不明，一律不用。画面上不画国界，不加海域名。
 """
@@ -45,7 +47,7 @@ class Stills:
         "静帧用途", "静帧来源 URL", "静帧许可", "静帧条款页", "画面署名", "静帧对应",
     )
     PUBLIC = (
-        "source", "source_url", "license_name", "terms_url", "author", "credit",
+        "source", "source_url", "license_name", "terms_url", "title", "author", "credit",
         "role", "matched_place", "matched_occasion", "image_url",
     )
 
@@ -131,16 +133,20 @@ class Stills:
                 occasion = token
             elif not place:
                 place = token
+        source = Stills.source_of(str(shot.get("静帧来源 URL") or ""))
+        credit = str(shot.get("画面署名") or "").strip()
+        parsed = Stills.split_credit(credit, source)
         return {
-            "source": Stills.source_of(str(shot.get("静帧来源 URL") or "")),
+            "source": source,
             "source_url": str(shot.get("静帧来源 URL") or "").strip(),
             "license_name": str(shot.get("静帧许可") or "").strip(),
             "terms_url": str(shot.get("静帧条款页") or "").strip(),
-            "credit": str(shot.get("画面署名") or "").strip(),
+            "title": parsed[0] if parsed else "",
+            "credit": credit,
             "role": str(shot.get("静帧用途") or "").strip(),
             "matched_place": place,
             "matched_occasion": occasion,
-            "author": "",
+            "author": parsed[1] if parsed else "",
             "image_url": "",
         }
 
@@ -180,15 +186,24 @@ class Stills:
                 return "Pexels 静帧的条款页必须是 https://www.pexels.com/license/"
         elif not Stills._WIKI_OK.match(license_name):
             return "Wikimedia 静帧的许可不在可用范围"
-        parsed = Stills.split_credit(credit)
+        parsed = Stills.split_credit(credit, source)
         if not parsed:
-            return "画面署名必须是来源 / 作者 / 许可"
-        label, author, lic = parsed
-        if label != Stills.LABEL[source] or lic != license_name:
-            return "画面署名与来源、作者、许可不一致"
+            if source == Stills.PEXELS:
+                return "画面署名必须是作者 / 许可"
+            return "画面署名必须是作品名 / 作者 / 许可"
+        title, author, lic = parsed
+        if Stills._house_name(author) or Stills._house_name(title):
+            return "画面署名不能把来源站写成作者"
+        if source == Stills.WIKIMEDIA and not title:
+            return "画面署名缺少作品名"
+        if lic != license_name:
+            return "画面署名与作品名、作者、许可不一致"
         given = str(rec.get("author") or "").strip()
         if given and given != author:
-            return "画面署名与来源、作者、许可不一致"
+            return "画面署名与作品名、作者、许可不一致"
+        given_title = str(rec.get("title") or "").strip()
+        if given_title and given_title != title:
+            return "画面署名与作品名、作者、许可不一致"
         if Stills._UNKNOWN.match(author):
             return "静帧作者不明，不能用"
         if any(word in credit for word in Stills._EVENT):
@@ -201,14 +216,67 @@ class Stills:
         return None
 
     @staticmethod
-    def split_credit(credit: str) -> tuple[str, str, str] | None:
+    def split_credit(credit: str, source: str = "") -> tuple[str, str, str] | None:
+        """返回 (作品名, 作者, 许可)。Pexels 没有作品名，第一项为空。"""
         parts = [p.strip() for p in (credit or "").split(" / ")]
-        if len(parts) < 3 or any(not p for p in parts):
+        if not parts or any(not p for p in parts):
+            return None
+        if source == Stills.PEXELS:
+            if len(parts) != 2:
+                return None
+            return "", parts[0], parts[1]
+        if len(parts) < 3:
             return None
         author = " / ".join(parts[1:-1]).strip()
         if not author:
             return None
         return parts[0], author, parts[-1]
+
+    @staticmethod
+    def _house_name(value: str) -> bool:
+        text = re.sub(r"\s+", " ", (value or "").strip()).casefold()
+        return text in {name.casefold() for name in Stills.LABEL.values()}
+
+    @staticmethod
+    def work_title(meta: dict) -> str:
+        """作品名只取该档自己的题名。没有就不编，也不拿描述或来源站顶上。
+
+        署名里的斜体如果整段都在 ObjectName 里，用这段斜体（该档自己标出的题名）。
+        否则用 ObjectName。两边都空，作品名就空着。
+        """
+        object_name = Stills._plain(Stills._meta_value(meta, "ObjectName"))
+        raw = Stills._meta_value(meta, "Attribution")
+        italic = ""
+        matched = re.search(r"<i\b[^>]*>(.*?)</i>", raw or "", flags=re.I | re.S)
+        if matched:
+            italic = Stills._plain(matched.group(1))
+        if italic and object_name and italic in object_name:
+            return italic
+        if object_name:
+            return object_name
+        if italic:
+            return italic
+        return ""
+
+    @staticmethod
+    def compose_credit(source: str, title: str, author: str, license_name: str) -> str:
+        """拼画面署名。缺作品名、缺作者，或作者是来源站，就返回空串。"""
+        title = Stills._plain(title)
+        author = Stills._plain(author)
+        license_name = (license_name or "").strip()
+        if not author or not license_name:
+            return ""
+        if Stills._house_name(author) or Stills._UNKNOWN.match(author):
+            return ""
+        if source == Stills.PEXELS:
+            if " / " in author:
+                return ""
+            return f"{author} / {license_name}"
+        if source != Stills.WIKIMEDIA:
+            return ""
+        if not title or Stills._house_name(title) or " / " in title:
+            return ""
+        return f"{title} / {author} / {license_name}"
 
     @staticmethod
     def source_of(url: str) -> str:
@@ -222,7 +290,8 @@ class Stills:
     @staticmethod
     def overlay(record: dict) -> dict:
         """烧进画面的署名数据。只有许可门已经通过的记录才该拿去画。"""
-        parsed = Stills.split_credit(str(record.get("credit") or ""))
+        parsed = Stills.split_credit(
+            str(record.get("credit") or ""), str(record.get("source") or ""))
         author = parsed[1] if parsed else str(record.get("author") or "")
         return {
             "source": record.get("source") or "",
@@ -393,6 +462,7 @@ class Stills:
                 "source_url": str(info.get("descriptionurl") or "").strip(),
                 "license_name": Stills._plain(Stills._meta_value(meta, "LicenseShortName")),
                 "terms_url": Stills._meta_value(meta, "LicenseUrl").strip(),
+                "title": Stills.work_title(meta),
                 "author": Stills._plain(Stills._meta_value(meta, "Artist")),
                 "image_url": str(info.get("thumburl") or info.get("url") or "").strip(),
                 "meta": blob,
@@ -511,51 +581,75 @@ class Stills:
     # ---------------------------------------------------------------- 画面
 
     @staticmethod
-    def credit_lines(draw: ImageDraw.ImageDraw, credit: str,
-                     max_w: int = 1500) -> list[str] | None:
+    def _credit_origin() -> tuple[int, int]:
+        """署名起点 x，以及它右边能用的宽度。和 paint 用同一条边。"""
+        from src.cards import W, _font
+        probe = ImageDraw.Draw(Image.new("RGB", (16, 16)))
+        role_w = probe.textlength(Stills.ROLE, font=_font(28, True))
+        text_x = int(40 + role_w + 36 + 28)
+        return text_x, max(240, W - text_x - 48)
+
+    @staticmethod
+    def credit_layout(draw: ImageDraw.ImageDraw, credit: str,
+                      max_w: int = 1500) -> tuple[list[str], int] | None:
         from src.cards import _font
         text = (credit or "").strip()
         if not text:
             return None
-        for size in range(32, 21, -2):
+        for size in range(28, 21, -2):
             font = _font(size, False)
             if draw.textlength(text, font=font) <= max_w:
-                return [text]
+                return [text], size
             parts = [p.strip() for p in text.split(" / ")]
             if len(parts) >= 2 and all(p and draw.textlength(p, font=font) <= max_w
                                        for p in parts):
-                return parts
+                return parts, size
         return None
 
     @staticmethod
+    def credit_lines(draw: ImageDraw.ImageDraw, credit: str,
+                     max_w: int = 1500) -> list[str] | None:
+        layout = Stills.credit_layout(draw, credit, max_w)
+        return None if layout is None else layout[0]
+
+    @staticmethod
     def credit_fits(credit: str) -> bool:
+        _text_x, max_w = Stills._credit_origin()
         probe = Image.new("RGB", (16, 16))
-        return Stills.credit_lines(ImageDraw.Draw(probe), credit) is not None
+        return Stills.credit_layout(ImageDraw.Draw(probe), credit, max_w) is not None
 
     @staticmethod
     def paint(photo: Image.Image, record: dict) -> Image.Image | None:
-        """新闻条幅加空镜署名。不写事实标题，不画国界，不加海域名。"""
+        """新闻条幅加空镜署名。不写事实标题，不画国界，不加海域名。
+
+        署名留在顶栏。标题卡 zoompan 会裁掉顶上约 40px，字幕在底边，两边都不盖署名。
+        """
         from src import cards
         credit = str(record.get("credit") or "")
         canvas = Image.new("RGB", (cards.W, cards.H), cards.BG)
         draw = ImageDraw.Draw(canvas)
-        lines = Stills.credit_lines(draw, credit, max_w=1480)
-        if not lines:
+        text_x, max_w = Stills._credit_origin()
+        layout = Stills.credit_layout(draw, credit, max_w)
+        if not layout:
             return None
+        lines, size = layout
+        text_font = cards._font(size, False)
+        line_h = max(size + 8, 36)
+        text_top = 52
+        text_bottom = text_top + line_h * len(lines)
+        bar_bottom = max(132, text_bottom + 20)
         draw.rectangle([0, 0, cards.W, 12], fill=cards.ACCENT)
-        bar_bottom = 132
         draw.rectangle([0, 12, cards.W, bar_bottom], fill=(8, 12, 18))
         role_font = cards._font(28, True)
-        role_w = draw.textlength(Stills.ROLE, font=role_font)
-        pill = [40, 46, 40 + role_w + 36, 94]
+        pill_h = 48
+        pill_y = 46 if bar_bottom <= 132 else max(46, (12 + bar_bottom - pill_h) // 2)
+        pill = [40, pill_y, text_x - 28, pill_y + pill_h]
         draw.rounded_rectangle(pill, 10, fill=cards.ACCENT)
-        draw.text((58, 54), Stills.ROLE, font=role_font, fill=cards.INK)
-        text_font = cards._font(28, False)
-        y = 28 if len(lines) > 1 else 48
-        x = pill[2] + 28
+        draw.text((58, pill_y + 8), Stills.ROLE, font=role_font, fill=cards.INK)
+        y = text_top
         for line in lines:
-            draw.text((x, y), line, font=text_font, fill=cards.INK)
-            y += 36
+            draw.text((text_x, y), line, font=text_font, fill=cards.INK)
+            y += line_h
         Stills._paste_contain(canvas, photo.convert("RGB"),
                               (48, bar_bottom + 24, cards.W - 48, cards.H - 48))
         return canvas
@@ -674,8 +768,7 @@ class Stills:
             if path is None or not Stills.credit_fits(rec.get("credit") or ""):
                 gaps.append(f"{label} 的静帧无法核对图像文件")
                 continue
-            filled = {**rec, "author": Stills.split_credit(rec["credit"])[1],
-                      "image_url": image, "path": str(path),
+            filled = {**rec, "image_url": image, "path": str(path),
                       "segment_id": seg.get("id") or ""}
             if Stills.accept(filled, shot.get("事实句") or "") is not None:
                 gaps.append(f"{label} 的静帧未过许可门")
@@ -743,9 +836,14 @@ class Stills:
         if Stills._norm_url(cand.get("terms_url") or "") != Stills._norm_url(
                 record.get("terms_url") or ""):
             return False
-        author = cand.get("author") or ""
-        parsed = Stills.split_credit(record.get("credit") or "")
-        if not parsed or author != parsed[1]:
+        parsed = Stills.split_credit(
+            record.get("credit") or "", record.get("source") or "")
+        if not parsed:
+            return False
+        title, author, _lic = parsed
+        if (cand.get("author") or "") != author:
+            return False
+        if (cand.get("title") or "") != title:
             return False
         return True
 
@@ -799,19 +897,20 @@ class Stills:
         hit = Stills.matches(cand.get("meta") or "", query)
         if not hit:
             return None
-        author = Stills._plain(cand.get("author") or "")
+        title = Stills._plain(str(cand.get("title") or ""))
+        author = Stills._plain(str(cand.get("author") or ""))
         license_name = str(cand.get("license_name") or "").strip()
-        if not author or not license_name:
-            return None
-        if source not in Stills.LABEL:
+        credit = Stills.compose_credit(source, title, author, license_name)
+        if not credit:
             return None
         record = {
             "source": source,
             "source_url": str(cand.get("source_url") or "").strip(),
             "license_name": license_name,
             "terms_url": str(cand.get("terms_url") or "").strip(),
+            "title": title if source == Stills.WIKIMEDIA else "",
             "author": author,
-            "credit": f"{Stills.LABEL[source]} / {author} / {license_name}",
+            "credit": credit,
             "role": Stills.ROLE,
             "matched_place": hit[0],
             "matched_occasion": hit[1],
