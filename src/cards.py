@@ -3,7 +3,8 @@
 
 卡片类型：
     hook     片头：栏目名 + 日期 + 期数
-    headline 大字标题卡：徽标 + 标题 + 副题 + 要点
+    headline 大字标题卡：徽标 + 标题 + 副题 + 要点。
+             线索包里已有同单位的一侧来源、一侧自称时，改画左右数字对照
     quote    待核实条目卡：灰徽标 + 「单方说法 待核实」
     map      棋盘示意卡：地区节点关系图（config 固定布局，非地理图）
     china    对华关联卡：金色点缀
@@ -215,6 +216,8 @@ def _draw_hook(img, d, seg, meta) -> None:
 
 
 def _draw_headline(img, d, seg, meta) -> None:
+    if NumberCard.offer(img, d, seg, meta):
+        return
     card = seg.get("card", {})
     full = [ln for ln in (card.get("full") or []) if ln]
     if full:
@@ -807,6 +810,242 @@ def _draw_map_dynamic(img, d, seg, meta, place: dict) -> None:
     d.text((1075, 905), "底图 Natural Earth（公有领域）", font=_font(26), fill=GRAY)
     d.text((x0 + 14, y0 + 12), tag, font=ftag, fill=DIM)   # 定位依据（宽度已适配）
     return ((x0 + px) / W, (y0 + py) / H)     # 焦点比例：渲染时 zoompan 推向此点
+
+
+class NumberCard:
+    """左右数字对照，只替换本来会画成大字卡的那一镜。
+
+    左、右各一个已经写在线索包里的数；来源和「自称」画在卡片底部。
+    两边不是同一单位、缺来源或缺「自称」，或者这一镜口播没有念到那句原话，
+    就不画。地图、静帧、引语卡不经过这里。
+    """
+
+    _ACTOR = r"[\u4e00-\u9fa5A-Za-z·]"
+    _UNIT = "公里|分钟|小时|艘|架|枚|席|人|名|吨|％|%"
+    _FIG = re.compile(rf"(约\s*)?(\d+(?:\.\d+)?)(\s*)({_UNIT})")
+    _SELF = re.compile(rf"({_ACTOR}{{2,16}})自称")
+    _SAID = re.compile(rf"({_ACTOR}{{2,16}})(?:称|表示|宣布|指出|声称)")
+    _MIN_FACT = 8
+    NUM_Y = 380
+    COLS = ((160, 920), (1000, 1760))
+    FOOT_Y = (860, 912)
+
+    @staticmethod
+    def layout(spec: dict) -> dict:
+        """纯函数：左数、右数同一行；来源和自称在更靠下的两行。"""
+        left, right = NumberCard.COLS
+        return {
+            "left": {"x0": left[0], "x1": left[1], "y": NumberCard.NUM_Y,
+                     "text": spec["left"]["value"], "unit": spec["left"]["unit"]},
+            "right": {"x0": right[0], "x1": right[1], "y": NumberCard.NUM_Y,
+                      "text": spec["right"]["value"], "unit": spec["right"]["unit"]},
+            "source": {"x": 180, "y": NumberCard.FOOT_Y[0],
+                       "text": "来源：" + spec["source"]},
+            "self_claim": {"x": 180, "y": NumberCard.FOOT_Y[1],
+                           "text": "自称：" + spec["self_actor"]},
+        }
+
+    @staticmethod
+    def pair(facts: list[dict]) -> dict | None:
+        """从线索包原文抽出唯一一对可对照的数。多对、对不上、或要新造，都返回 None。"""
+        rows = [f for f in facts or []
+                if isinstance(f, dict) and str(f.get("text") or "").strip()]
+        if not rows:
+            return None
+        found = []
+        base = 0
+        for row in rows:
+            text = str(row.get("text") or "")
+            found.extend(NumberCard._figures(row, base))
+            base += len(text) + 1
+        kept: dict[tuple, dict] = {}
+        for fig in found:
+            key = (fig["digits"], fig["unit"], fig["actor"], fig["kind"])
+            old = kept.get(key)
+            if old is None or fig["pos"] < old["pos"]:
+                kept[key] = fig
+        groups: dict[str, list[dict]] = {}
+        for fig in kept.values():
+            groups.setdefault(fig["unit"], []).append(fig)
+        pairs = []
+        for group in groups.values():
+            if len(group) != 2:
+                continue
+            a, b = group
+            if NumberCard._same(a["digits"], b["digits"]):
+                continue
+            if {a["kind"], b["kind"]} != {"自称", "来源"}:
+                continue
+            if not a["actor"] or a["actor"] == b["actor"]:
+                continue
+            pairs.append((a, b))
+        if len(pairs) != 1:
+            return None
+        a, b = pairs[0]
+        left, right = sorted((a, b), key=lambda fig: fig["pos"])
+        self_fig = a if a["kind"] == "自称" else b
+        src_fig = b if self_fig is a else a
+        blob = "\n".join(str(row.get("text") or "") for row in rows)
+        names = {str(row.get("source") or "").strip() for row in rows}
+        names.discard("")
+
+        def allowed(token: str) -> bool:
+            return bool(token) and (token in blob or token in names)
+
+        for token in (left["value"], right["value"], left["unit"], right["unit"],
+                      src_fig["actor"], self_fig["actor"]):
+            if not allowed(token):
+                return None
+        if "自称" not in blob:
+            return None
+        for value in (left["value"], right["value"]):
+            if any(n not in blob for n in re.findall(r"\d+(?:\.\d+)?", value)):
+                return None
+        return {
+            "left": {"value": left["value"], "unit": left["unit"]},
+            "right": {"value": right["value"], "unit": right["unit"]},
+            "source": src_fig["actor"],
+            "self_actor": self_fig["actor"],
+        }
+
+    @staticmethod
+    def for_segment(pid: str, seg: dict) -> dict | None:
+        """只读这一镜口播已经覆盖到的那一条线索。读不到线索包就放弃。"""
+        from src import store
+        brief = load_json(store.ROOT / "projects" / str(pid) / "briefing.json")
+        if not isinstance(brief, dict):
+            return None
+        spoken = str((seg or {}).get("narration") or "")
+        for cue in (seg or {}).get("cues") or []:
+            if isinstance(cue, dict):
+                spoken += str(cue.get("text") or "")
+        if not spoken.strip():
+            return None
+        excluded = set(brief.get("excluded_refs") or [])
+        owners = []
+        for index, item in enumerate(brief.get("items") or [], 1):
+            if not isinstance(item, dict) or index in excluded:
+                continue
+            hit = [row for row in NumberCard._facts(item)
+                   if NumberCard._spoken(spoken, row["text"])]
+            if hit:
+                owners.append(hit)
+        if len(owners) != 1:
+            return None
+        return NumberCard.pair(owners[0])
+
+    @staticmethod
+    def offer(img, d, seg, meta) -> bool:
+        """能对照才画。返回 False 时原大字卡照旧。"""
+        pid = str((meta or {}).get("pid") or "")
+        if not pid:
+            return False
+        spec = NumberCard.for_segment(pid, seg or {})
+        if not spec:
+            return False
+        NumberCard.draw(img, d, spec)
+        return True
+
+    @staticmethod
+    def draw(img, d, spec: dict) -> None:
+        lay = NumberCard.layout(spec)
+        d.line([(960, 320), (960, 820)], fill=ACCENT, width=4)
+        for key in ("left", "right"):
+            box = lay[key]
+            width = box["x1"] - box["x0"] - 48
+            font = _fit(d, box["text"], 120, width, bold=True)
+            NumberCard._text_centered(d, box["text"], font, box["x0"], box["x1"],
+                                      box["y"], INK)
+            unit_font = _font(40, True)
+            NumberCard._text_centered(d, box["unit"], unit_font, box["x0"], box["x1"],
+                                      box["y"] + 150, DIM)
+        for key in ("source", "self_claim"):
+            box = lay[key]
+            font = _fit(d, box["text"], 36, W - 360, bold=True)
+            d.text((box["x"], box["y"]), box["text"], font=font, fill=INK)
+
+    @staticmethod
+    def _facts(item: dict) -> list[dict]:
+        facts = []
+        summary = str(item.get("summary") or "").strip()
+        if summary:
+            facts.append({"text": summary, "source": "", "role": "body"})
+        for src in item.get("sources") or []:
+            if not isinstance(src, dict):
+                continue
+            claim = str(src.get("claim") or "").strip()
+            if claim:
+                facts.append({"text": claim,
+                              "source": str(src.get("name") or "").strip(),
+                              "role": "claim"})
+        return facts
+
+    @staticmethod
+    def _spoken(spoken: str, fact: str) -> bool:
+        core = re.sub(r"[。！？；，、\s]", "", fact or "")
+        if len(core) < NumberCard._MIN_FACT:
+            return False
+        return NumberCard._compact(fact) in NumberCard._compact(spoken)
+
+    @staticmethod
+    def _compact(text: str) -> str:
+        return re.sub(r"\s+", "", text or "")
+
+    @staticmethod
+    def _clean_actor(raw: str) -> str:
+        actor = re.split(r"[年月日]", raw or "")[-1].strip()
+        return actor if len(actor) >= 2 else ""
+
+    @staticmethod
+    def _attributions(text: str) -> list[dict]:
+        found = []
+        spans = []
+        for cre, kind in ((NumberCard._SELF, "自称"), (NumberCard._SAID, "来源")):
+            for m in cre.finditer(text):
+                span = m.span()
+                if any(not (span[1] <= a or span[0] >= b) for a, b in spans):
+                    continue
+                actor = NumberCard._clean_actor(m.group(1))
+                if not actor:
+                    continue
+                found.append({"kind": kind, "actor": actor, "end": m.end()})
+                spans.append(span)
+        return found
+
+    @staticmethod
+    def _figures(fact: dict, base: int) -> list[dict]:
+        text = str(fact.get("text") or "")
+        attrs = NumberCard._attributions(text)
+        out = []
+        for m in NumberCard._FIG.finditer(text):
+            unit = m.group(4)
+            value = m.group(0)[:len(m.group(0)) - len(unit)].strip()
+            prev = [a for a in attrs if a["end"] <= m.start()]
+            if prev:
+                attr = max(prev, key=lambda a: a["end"])
+                kind, actor = attr["kind"], attr["actor"]
+            elif fact.get("role") == "claim" and str(fact.get("source") or "").strip():
+                actor = str(fact.get("source") or "").strip()
+                kind = "自称" if "自称" in text else "来源"
+            else:
+                continue
+            if not value or len(actor) < 2:
+                continue
+            out.append({"value": value, "digits": m.group(2), "unit": unit,
+                        "kind": kind, "actor": actor, "pos": base + m.start()})
+        return out
+
+    @staticmethod
+    def _same(a: str, b: str) -> bool:
+        try:
+            return float(a) == float(b)
+        except ValueError:
+            return a == b
+
+    @staticmethod
+    def _text_centered(d, text: str, font, x0: int, x1: int, y: int, fill) -> None:
+        tw = d.textlength(text, font=font)
+        d.text((int(x0 + max(0, (x1 - x0 - tw) / 2)), y), text, font=font, fill=fill)
 
 
 _DRAWERS = {"hook": _draw_hook, "headline": _draw_headline, "quote": _draw_quote,
