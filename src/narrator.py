@@ -3,6 +3,9 @@
 
 质量闸门沿 see-china 惯例：神经后端全部不可用时抛错，绝不放机械音上线。
 逐段合成 audio/segNN.wav（44.1k mono），断点续跑按文件存在跳过。
+
+送进引擎的是同一事实的可念文本（停顿标点 + 数字分写）。锁定稿不改。
+voice.json 记下这句 spoken，字幕跟这一次合成的词界走。
 """
 import asyncio
 import hashlib
@@ -14,11 +17,13 @@ import requests
 
 from src import ffmpeg, scriptgen, store
 from src.config import api_keys, load_config
+from src.speakable import Speakable
 
 
 def _audio_key(seg: dict) -> str:
-    """音频缓存键 = 段号 + 文案哈希：稿子改了就绝不会复用旧音频。"""
-    h = hashlib.md5(seg["narration"].encode("utf-8")).hexdigest()[:8]
+    """缓存键含可念文本。稿子或念法变了就不再复用旧音频；两者都没变时键与原来相同。"""
+    spoken = Speakable.text(seg["narration"])
+    h = hashlib.md5(spoken.encode("utf-8")).hexdigest()[:8]
     return f"{seg['id']}_{h}"
 
 ZHIPU_SPEECH_URL = "https://open.bigmodel.cn/api/paas/v4/audio/speech"
@@ -98,7 +103,7 @@ def _synth_cosy_batch(segs: list, audio_dir: Path, cosy_cfg: dict) -> list[Path]
         if dst.exists():
             continue
         mp3 = audio_dir / f"{_audio_key(s)}_cosy.wav"
-        jobs.append({**base, "text": s["narration"],
+        jobs.append({**base, "text": Speakable.text(s["narration"]),
                      "out": str(mp3.resolve())})
     if jobs:
         _COSY_MANIFEST.write_text(
@@ -169,7 +174,8 @@ def _voice_locked(seg: dict, audio_dir: Path, vcfg: dict, key: str,
     cues_out = []
     pieces = []
     for i, cue in enumerate(seg["cues"]):
-        h = hashlib.md5(cue["text"].encode("utf-8")).hexdigest()[:8]
+        spoken_line = Speakable.text(cue["text"])
+        h = hashlib.md5(spoken_line.encode("utf-8")).hexdigest()[:8]
         fitted = audio_dir / f"{seg['id']}_c{i}_{h}.wav"
         window = float(cue["end"]) - float(cue["start"])
         mp3 = audio_dir / f"{seg['id']}_c{i}_{h}.mp3"
@@ -177,7 +183,7 @@ def _voice_locked(seg: dict, audio_dir: Path, vcfg: dict, key: str,
             raw = audio_dir / f"{seg['id']}_c{i}_{h}.raw.wav"
             if not raw.exists():
                 if not mp3.exists():
-                    backend = _speak(cue["text"], mp3, vcfg, key) or backend
+                    backend = _speak(spoken_line, mp3, vcfg, key) or backend
                 _to_wav(mp3, raw)
             raw_dur = ffmpeg.probe_duration(raw)
             fit_dur = _fit_window(raw, fitted, window)
@@ -187,7 +193,8 @@ def _voice_locked(seg: dict, audio_dir: Path, vcfg: dict, key: str,
             _carry_words(mp3 if scriptgen.Subtitles.read_words(mp3) else raw,
                          fitted, scale)
         dur = round(ffmpeg.probe_duration(fitted), 3)
-        spoken = {"at": float(cue["start"]), "wav": str(fitted), "duration": dur}
+        spoken = {"at": float(cue["start"]), "wav": str(fitted),
+                  "duration": dur, "spoken": spoken_line}
         words = scriptgen.Subtitles.read_words(fitted)
         if words:
             spoken["words"] = words
@@ -224,6 +231,7 @@ def voice(pid: str) -> dict:
         wav = audio_dir / f"{_audio_key(s)}.wav"
         if wav.exists():
             continue
+        spoken_line = Speakable.text(s["narration"])
         if backend == "cosy":
             src = audio_dir / f"{_audio_key(s)}_cosy.wav"  # 批量产物 → 统一规范 wav
             if not src.exists():
@@ -234,14 +242,14 @@ def voice(pid: str) -> dict:
         if not mp3.exists():
             errs = []
             try:
-                _synth_edge(s["narration"], mp3,
+                _synth_edge(spoken_line, mp3,
                             vcfg["edge_voice"], vcfg.get("edge_rate", "+0%"))
                 backend = backend or "edge"
             except Exception as e:
                 errs.append(f"edge: {type(e).__name__}: {str(e)[:80]}")
                 if key:
                     try:
-                        _synth_zhipu(s["narration"], mp3, key,
+                        _synth_zhipu(spoken_line, mp3, key,
                                      vcfg.get("zhipu_model", "cogtts"),
                                      vcfg.get("zhipu_voice", "tongtong"))
                         backend = backend or "zhipu"
@@ -260,7 +268,8 @@ def voice(pid: str) -> dict:
             continue
         wav = audio_dir / f"{_audio_key(s)}.wav"
         item = {"id": s["id"], "wav": str(wav),
-                "duration": round(ffmpeg.probe_duration(wav), 3)}
+                "duration": round(ffmpeg.probe_duration(wav), 3),
+                "spoken": Speakable.text(s["narration"])}
         words = scriptgen.Subtitles.read_words(wav)
         if words:
             item["words"] = words

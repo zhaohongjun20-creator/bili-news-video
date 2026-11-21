@@ -256,8 +256,9 @@ def narration_lines(narration: str, width: int = 16) -> list[str]:
 class Subtitles:
     """字幕行与出现时间。
 
-    口播文本只用稿子里已经锁住的句子。出现时间只用配音写进 voice.json 的
-    edge-tts WordBoundary（秒）。没有这份词级时间时，锁定字幕拍仍用拍上的时码；
+    出现时间只用配音写进 voice.json 的 edge-tts WordBoundary（秒）。
+    字用这一次合成实际念出来的那句（voice 段上的 spoken）。没有这份记录时，
+    仍用稿子里锁住的句子。对不上词级时间就不估：锁定字幕拍用拍上的时码，
     其余才按字数分整段音频窗口。不另造一条时钟。
 
     断行只发生在标点或词与词之间。一个词（例如「举行」「发表」）不拆到两行。
@@ -499,10 +500,18 @@ class Subtitles:
         return lines or [narration]
 
     @staticmethod
+    def spoken_line(fallback: str, piece: dict | None) -> str:
+        """这一次合成送进引擎的句子。没有记录就用锁定稿，不另写一句。"""
+        recorded = (piece or {}).get("spoken")
+        if isinstance(recorded, str) and recorded.strip():
+            return recorded
+        return fallback
+
+    @staticmethod
     def for_segment(narration: str, seg: dict, cues: list | None,
                     voice_seg: dict | None, width: int = 16
                     ) -> list[tuple[float, float, str]]:
-        """一段字幕。词级时间对得上原文才用；对不上不估。"""
+        """一段字幕。词级时间对得上实际念出的那句才用；对不上不估。"""
         voice_seg = voice_seg or {}
         if cues:
             voice_cues = list(voice_seg.get("cues") or [])
@@ -511,22 +520,29 @@ class Subtitles:
                 placed = []
                 for cue, spoken in zip(cues, voice_cues):
                     origin = float(spoken.get("at", cue["start"]))
-                    chunk = Subtitles.place(cue["text"], spoken["words"], origin, width)
+                    line = Subtitles.spoken_line(cue["text"], spoken)
+                    chunk = Subtitles.place(line, spoken["words"], origin, width)
                     if not chunk:
                         placed = []
                         break
                     placed.extend(chunk)
                 if placed:
                     return placed
-            return [(float(c["start"]), float(c["end"]), c["text"]) for c in cues]
+            return [
+                (float(c["start"]), float(c["end"]),
+                 Subtitles.spoken_line(
+                     c["text"], voice_cues[i] if i < len(voice_cues) else None))
+                for i, c in enumerate(cues)
+            ]
 
         words = voice_seg.get("words") or []
         origin = float(seg["start"]) + float(seg.get("audio_in") or 0)
+        line = Subtitles.spoken_line(narration, voice_seg)
         if words:
-            placed = Subtitles.place(narration, words, origin, width)
+            placed = Subtitles.place(line, words, origin, width)
             if placed:
                 return placed
-        lines = Subtitles.lines(narration, width)
+        lines = Subtitles.lines(line, width)
         if not lines:
             return []
         a0 = origin
