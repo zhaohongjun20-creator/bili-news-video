@@ -1144,6 +1144,7 @@ class ShotList:
             "source_url": pick("source_url", "静帧来源 URL"),
             "license_name": pick("license_name", "静帧许可"),
             "terms_url": pick("terms_url", "静帧条款页"),
+            "title": pick("title"),
             "author": pick("author"),
             "credit": pick("credit", "画面署名"),
             "role": pick("role", "静帧用途") or Stills.ROLE,
