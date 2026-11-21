@@ -42,10 +42,32 @@ def _to_wav(src: Path, dst: Path) -> Path:
 
 
 def _synth_edge(text: str, out: Path, voice: str, rate: str) -> Path:
+    """同一条合成里留下 WordBoundary。offset 仍是引擎的 100 纳秒时钟。"""
+    meta = Path(str(out) + ".boundaries.jsonl")
+
     async def run():
-        await edge_tts.Communicate(text, voice, rate=rate).save(str(out))
+        await edge_tts.Communicate(
+            text, voice, rate=rate, boundary="WordBoundary",
+        ).save(str(out), str(meta))
     asyncio.run(run())
+    words = []
+    if meta.exists():
+        words = scriptgen.Subtitles.words_from_jsonl(
+            meta.read_text(encoding="utf-8"))
+        meta.unlink()
+    scriptgen.Subtitles.write_words(out, words)
     return out
+
+
+def _carry_words(src: Path, dst: Path, scale: float = 1.0) -> list:
+    """词级时间跟着实际播放的 wav 走。只在 atempo 真正改变时长时缩放。"""
+    words = scriptgen.Subtitles.read_words(src)
+    if not words:
+        return []
+    if abs(float(scale) - 1.0) > 1e-6:
+        words = scriptgen.Subtitles.scale(words, scale)
+    scriptgen.Subtitles.write_words(dst, words)
+    return words
 
 
 def _synth_zhipu(text: str, out: Path, key: str, model: str, voice: str) -> Path:
@@ -150,17 +172,27 @@ def _voice_locked(seg: dict, audio_dir: Path, vcfg: dict, key: str,
         h = hashlib.md5(cue["text"].encode("utf-8")).hexdigest()[:8]
         fitted = audio_dir / f"{seg['id']}_c{i}_{h}.wav"
         window = float(cue["end"]) - float(cue["start"])
+        mp3 = audio_dir / f"{seg['id']}_c{i}_{h}.mp3"
         if not fitted.exists() or fitted.stat().st_size < 1000:
             raw = audio_dir / f"{seg['id']}_c{i}_{h}.raw.wav"
-            mp3 = audio_dir / f"{seg['id']}_c{i}_{h}.mp3"
             if not raw.exists():
                 if not mp3.exists():
                     backend = _speak(cue["text"], mp3, vcfg, key) or backend
                 _to_wav(mp3, raw)
-            _fit_window(raw, fitted, window)
+            raw_dur = ffmpeg.probe_duration(raw)
+            fit_dur = _fit_window(raw, fitted, window)
+            scale = 1.0
+            if raw_dur > 0 and abs(fit_dur - raw_dur) > 0.03:
+                scale = fit_dur / raw_dur
+            _carry_words(mp3 if scriptgen.Subtitles.read_words(mp3) else raw,
+                         fitted, scale)
         dur = round(ffmpeg.probe_duration(fitted), 3)
-        cues_out.append({"at": float(cue["start"]), "wav": str(fitted),
-                         "duration": dur})
+        spoken = {"at": float(cue["start"]), "wav": str(fitted), "duration": dur}
+        words = scriptgen.Subtitles.read_words(fitted)
+        if words:
+            spoken["words"] = words
+            spoken["timing"] = scriptgen.Subtitles.TIMING
+        cues_out.append(spoken)
         pieces.append(fitted)
     wav = audio_dir / f"{_audio_key(seg)}.wav"
     duration = round(_concat_wavs(pieces, wav), 3)
@@ -218,6 +250,7 @@ def voice(pid: str) -> dict:
             if not mp3.exists():
                 raise RuntimeError(f"段 {s['id']} 配音全后端失败：{'；'.join(errs)}")
         _to_wav(mp3, wav)
+        _carry_words(mp3, wav, 1.0)
 
     segs_out = []
     for s in script["segments"]:
@@ -226,8 +259,13 @@ def voice(pid: str) -> dict:
             segs_out.append(item)
             continue
         wav = audio_dir / f"{_audio_key(s)}.wav"
-        segs_out.append({"id": s["id"], "wav": str(wav),
-                         "duration": round(ffmpeg.probe_duration(wav), 3)})
+        item = {"id": s["id"], "wav": str(wav),
+                "duration": round(ffmpeg.probe_duration(wav), 3)}
+        words = scriptgen.Subtitles.read_words(wav)
+        if words:
+            item["words"] = words
+            item["timing"] = scriptgen.Subtitles.TIMING
+        segs_out.append(item)
     result = {"backend": backend or "cache", "segments": segs_out}
     from src.jsonio import save_json
     save_json(result, store.project_dir(pid) / "voice.json")
