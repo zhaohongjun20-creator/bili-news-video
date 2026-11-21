@@ -21,6 +21,7 @@ DEFAULTS = {
     "qc": {"min_mean_volume_db": -45.0, "max_volume_db": -0.5,
            "duration_tolerance_s": 8.0},
     "publish": {"category": 17, "tags": [], "disclaimer": ""},
+    "stills": {"enable": True, "max_per_episode": 3},
 }
 
 
@@ -45,5 +46,8 @@ def load_config() -> dict:
 
 def api_keys() -> dict:
     if os.environ.get("NEWS_OFFLINE") == "1":   # pipeline offline 模式：强制模板降级
-        return {"zhipu": ""}
-    return {"zhipu": os.environ.get("ZHIPU_API_KEY", "").strip()}
+        return {"zhipu": "", "pexels": ""}
+    return {
+        "zhipu": os.environ.get("ZHIPU_API_KEY", "").strip(),
+        "pexels": os.environ.get("PEXELS_API_KEY", "").strip(),
+    }

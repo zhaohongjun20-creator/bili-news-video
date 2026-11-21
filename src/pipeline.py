@@ -38,6 +38,10 @@ def make(pid: str, offline: bool = False) -> dict:
     if not store.stage_done(pid, "render"):
         if msg := ShotList.refusal(pid):
             raise PipelineError(msg)
+        from src.stills import Stills
+        Stills.attach(pid)
+        if gaps := Stills.gaps(pid):
+            raise PipelineError("静帧未过许可门，不进渲染：" + "；".join(gaps))
         cards.render_cards(pid)
         renderer.render(pid)
         steps.append("render")
