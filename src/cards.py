@@ -79,10 +79,20 @@ _FONTS: dict[int, ImageFont.FreeTypeFont] = {}
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    key = size * 2 + bold
+    key = size * 2 + int(bool(bold))
     if key not in _FONTS:
-        path = r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc"
-        _FONTS[key] = ImageFont.truetype(path, size)
+        candidates = [
+            r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
+            else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+        chosen = next((path for path in candidates if Path(path).is_file()), "")
+        if chosen:
+            _FONTS[key] = ImageFont.truetype(chosen, size)
+        else:
+            _FONTS[key] = ImageFont.load_default()
     return _FONTS[key]
 
 
@@ -817,9 +827,20 @@ def render_cards(pid: str) -> list[dict]:
     meta = dict(script["meta"], pid=pid, hook_place=hook_place,
                 hook_line=(first_item.get("card", {}).get("headline", "")
                            if first_item else ""))
+    from src.stills import Stills
+    stills = Stills.load(pid)
     out = []
     for seg in script["segments"]:
+        record = stills.get(seg["id"])
         phases = seg.get("card", {}).get("phases") or [None]
+        if record and phases == [None]:
+            painted = Stills.paint_segment(seg, record)
+            if painted is not None:
+                png = cards_dir / f"{seg['id']}.png"
+                painted.save(png)
+                out.append({"id": seg["id"], "png": str(png),
+                            "still": Stills.overlay(record)})
+                continue
         spans = []
         entry_png = None
         ret = None

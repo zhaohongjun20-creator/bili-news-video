@@ -53,6 +53,12 @@ def doctor(_cfg: dict | None = None) -> list[tuple[str, str, str]]:
     else:
         rows.append(("soft", "ZHIPU_API_KEY", "未配置：ingest/scriptgen 走模板降级"))
 
+    if api_keys().get("pexels"):
+        rows.append(("ok", "PEXELS_API_KEY", "已配置（Pexels 只作空镜）"))
+    else:
+        rows.append(("soft", "PEXELS_API_KEY",
+                     "未配置：静帧只走 Wikimedia Commons，Pexels 空镜跳过"))
+
     import edge_tts  # noqa
     rows.append(("ok", "edge 音色", cfg["voice"]["edge_voice"]))
     return rows

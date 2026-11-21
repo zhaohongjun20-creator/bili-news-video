@@ -50,6 +50,7 @@ class ShotList:
     SHOT_KEYS = frozenset({
         "CUT", "时码", "镜类", "事实句", "出处", "画面类型", "来源 URL",
         "许可", "起止时间", "字幕", "指定封面",
+        "静帧用途", "静帧来源 URL", "静帧许可", "静帧条款页", "画面署名", "静帧对应",
     })
 
     @staticmethod
@@ -550,8 +551,24 @@ class ShotList:
         if kind not in ShotList.LIVE and kind not in ShotList.CARD:
             return [f"{label} 画面类型须单选：官方实拍、公有领域、明确许可、地图卡、数据卡"]
         if kind in ShotList.LIVE:
-            return ShotList._check_live(shot, label, kind)
-        return ShotList._check_card(shot, label, kind)
+            problems = ShotList._check_live(shot, label, kind)
+        else:
+            problems = ShotList._check_card(shot, label, kind)
+        problems.extend(ShotList._check_still(shot, label))
+        return problems
+
+    @staticmethod
+    def _check_still(shot: dict, label: str) -> list[str]:
+        """库存静帧比实拍多要画面署名。缺一项就不过门。不把空镜写成实拍。"""
+        from src.stills import Stills
+        if Stills.is_blank_shot(shot):
+            return []
+        if shot.get("画面类型", "").strip() in ShotList.LIVE:
+            return [f"{label} 实拍镜不能叠库存静帧，库存图只能作空镜"]
+        reason = Stills.accept(Stills.from_shot(shot), shot.get("事实句") or "")
+        if reason:
+            return [f"{label} {reason}"]
+        return []
 
     @staticmethod
     def _check_live(shot: dict, label: str, kind: str) -> list[str]:
@@ -782,7 +799,10 @@ class ShotList:
         md_footage = ShotList._markdown_footage(md)
         if md_footage and items:
             ShotList._attach_markdown_footage(items, md_footage)
-        elif md_footage and not items:
+        md_stills = ShotList._markdown_stills(md)
+        if md_stills and items:
+            ShotList._attach_markdown_stills(items, md_stills)
+        if md_footage and not items:
             items = [{"title": "", "summary": header["what"] or header["hook"],
                       "event_time": header["time_place"], "sources": [],
                       "footage": md_footage[0]}]
@@ -831,6 +851,7 @@ class ShotList:
                     "event_time": str(it.get("event_time") or "").strip(),
                     "sources": sources,
                     "footage": ShotList._footage_of(it),
+                    "still": ShotList._still_of(it.get("still")),
                 })
             return out
         if (script.get("meta") or {}).get("mode") == "manual":
@@ -1070,9 +1091,107 @@ class ShotList:
 
     @staticmethod
     def _make_shot(fact: str, attrib: str, footage: dict | None, role: str) -> dict:
+        from src.stills import Stills
         pic = ShotList._picture(footage)
         return {"事实句": fact, "出处": attrib, "镜类": role,
-                "字幕": fact, "指定封面": "否", **pic}
+                "字幕": fact, "指定封面": "否", **pic, **Stills.blank_fields()}
+
+    @staticmethod
+    def _apply_stills(shots: list[dict], items: list[dict]) -> list[dict]:
+        """只把已经过门、且地点或场合就在该句里的静帧抄上去。不改画面类型。"""
+        from src.stills import Stills
+        pending = []
+        for item in items:
+            still = item.get("still")
+            if still and still not in pending:
+                pending.append(still)
+        used: set[int] = set()
+        for shot in shots:
+            fact = shot.get("事实句") or ""
+            for index, still in enumerate(pending):
+                if index in used:
+                    continue
+                if Stills.accept(still, fact) is not None:
+                    continue
+                shot.update(Stills.shot_fields(still))
+                used.add(index)
+                break
+        return shots
+
+    @staticmethod
+    def _still_of(raw) -> dict | None:
+        from src.stills import Stills
+        if not isinstance(raw, dict):
+            return None
+
+        def pick(*keys: str) -> str:
+            for key in keys:
+                value = str(raw.get(key) or "").strip()
+                if value and value != Stills.BLANK:
+                    return value
+            return ""
+
+        tokens = Stills._split_tokens(pick("静帧对应"))
+        place = pick("matched_place")
+        occasion = pick("matched_occasion")
+        for token in tokens:
+            if token in Stills.OCCASION_EN and not occasion:
+                occasion = token
+            elif not place:
+                place = token
+        still = {
+            "source": pick("source") or Stills.source_of(pick("source_url", "静帧来源 URL")),
+            "source_url": pick("source_url", "静帧来源 URL"),
+            "license_name": pick("license_name", "静帧许可"),
+            "terms_url": pick("terms_url", "静帧条款页"),
+            "author": pick("author"),
+            "credit": pick("credit", "画面署名"),
+            "role": pick("role", "静帧用途") or Stills.ROLE,
+            "matched_place": place,
+            "matched_occasion": occasion,
+            "image_url": pick("image_url", "静帧图像 URL"),
+        }
+        if not any(still[key] for key in ("source_url", "license_name", "terms_url", "credit")):
+            return None
+        return still
+
+    @staticmethod
+    def _markdown_stills(md: str) -> list[dict]:
+        if not md or "静帧用途" not in md:
+            return []
+        blocks = re.split(r"(?m)^(?=\s*(?:[-*]\s*)?静帧用途\s*[:：])", md)
+        out = []
+        keys = ("静帧用途", "静帧来源 URL", "静帧许可", "静帧条款页",
+                "画面署名", "静帧对应", "静帧图像 URL")
+        for block in blocks[1:]:
+            lines = []
+            for ln in block.splitlines():
+                if lines and (not ln.strip() or ln.startswith("#")):
+                    break
+                lines.append(ln)
+            fields = {k: ShotList._labeled("\n".join(lines), k) for k in keys}
+            still = ShotList._still_of(fields)
+            if still and still.get("role") == "空镜":
+                out.append(still)
+        return out
+
+    @staticmethod
+    def _attach_markdown_stills(items: list[dict], blocks: list[dict]) -> None:
+        from src.stills import Stills
+        for block in blocks:
+            tokens = [t for t in (block.get("matched_place"), block.get("matched_occasion")) if t]
+            target = None
+            for index, item in enumerate(items):
+                if item.get("still"):
+                    continue
+                blob = item["title"] + item["summary"]
+                blob += "".join(src.get("claim") or "" for src in item["sources"])
+                if tokens and all(token in blob for token in tokens):
+                    if Stills.accept(block, blob) is None:
+                        target = index
+                        break
+            if target is not None:
+                items[target]["still"] = block
 
     @staticmethod
     def _fill_header(header: dict, items: list[dict]) -> dict:
@@ -1189,7 +1308,8 @@ class ShotList:
         header = ShotList._fill_header(pkg["header"], pkg["items"])
         if not header["hook"]:
             header["hook"] = ""
-        shots = ShotList._build_shots(header, pkg["items"])
+        shots = ShotList._apply_stills(
+            ShotList._build_shots(header, pkg["items"]), pkg["items"])
         if shots and not header["hook"]:
             header["hook"] = shots[0]["事实句"]
         cover_lines, shots = ShotList._cover_block(shots, header)
@@ -1207,12 +1327,19 @@ class ShotList:
                 f"起止时间: {shot['起止时间']}",
                 f"字幕: {shot['字幕']}",
                 f"指定封面: {shot['指定封面']}",
+                f"静帧用途: {shot.get('静帧用途', '无')}",
+                f"静帧来源 URL: {shot.get('静帧来源 URL', '无')}",
+                f"静帧许可: {shot.get('静帧许可', '无')}",
+                f"静帧条款页: {shot.get('静帧条款页', '无')}",
+                f"画面署名: {shot.get('画面署名', '无')}",
+                f"静帧对应: {shot.get('静帧对应', '无')}",
             ]
             if shot.get("素材文件"):
                 lines.append(f"素材文件: {shot['素材文件']}")
             lines.append(ShotList._prompt(shot))
             lines.append("禁止: 不虚构现场；不添加线索包没有的情节或表情；"
-                         "不用未授权的电视、通讯社或新闻网站成片；不站队、不预测")
+                         "不用未授权的电视、通讯社或新闻网站成片；不站队、不预测；"
+                         "不把库存空镜标成事发现场")
             blocks.append("\n".join(lines))
         head = [
             "# 线索包 → 分镜清单",
